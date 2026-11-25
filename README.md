@@ -6,7 +6,7 @@
 
 - 采集：Trae `UserPromptSubmit` Hook，事件写入本地
 - 调度与分析：Trae 自动化任务，每天 03:00 触发
-- 补跑：`SessionStart` Hook 调用 `catch-up`，补上睡眠期间错过的 03:00
+- 补跑：`SessionStart` Hook 执行 `session-start`，先校验/静默补齐环境，再补上睡眠期间错过的 03:00
 - 长期记忆：`~/.fomor/` 下的文件结构（可用 `FOMOR_HOME` 覆盖）
 - 交付：自动化任务对话流 + `~/.fomor/reports/`（不做独立网页）
 - 反馈：次日 03:00 回看用户提问，有兴趣的移入长期记忆，其余到期删除
@@ -36,17 +36,9 @@ scripts/fomor status
 
 ```text
 scripts/
-├── fomor               唯一可执行入口（无扩展名，Hook 与分析命令调用）
-└── lib/fomor/          Python 包
-    ├── cli.py          命令行
-    ├── pipeline.py     反馈回看 → 聚合 → 理解 → 评分 → 探索 → 报告
-    ├── feedback.py     次日隐式反馈归因
-    ├── scheduler.py    03:00 截止时间与首次唤醒补跑
-    ├── store.py        Event / Topic / Discovery 持久化
-    ├── llm.py          mock / traecli / openai
-    └── prompts.py      读取 references/ 中的提示词
+└── fomor               唯一可执行入口（单文件，无扩展名）
 hooks/
-└── hooks.json          UserPromptSubmit 采集 + SessionStart 补跑
+└── hooks.json          UserPromptSubmit 采集 + SessionStart 环境校验/补跑
 references/
 ├── 00-system.md        分析引擎全局规则
 ├── 01-aggregate.md … 06-feedback.md
@@ -59,12 +51,12 @@ tests/                  标准库 unittest
 
 约定：
 
-- 可执行逻辑只放 `scripts/` 与 `hooks/`
+- 可执行逻辑只在 `scripts/fomor` 与 `hooks/`
 - `references/` 只放静态、按需读取的参考内容（提示词契约、数据模型）
 - 同一个 SOP 只写一个 skill，不按步骤拆分
 - `docs/` 是维护者文档，不注入运行时
 
-运行时数据全部在 `~/.fomor/`：`events/`、`topics/`、`discoveries/{pending,promoted}`、`tombstones/`、`reports/`、`runtime/`、`logs/`、`backup/`。仓库内的 `data/` 是早期原型样例，不参与运行。
+运行时数据全部在 `~/.fomor/`：`events/`、`topics/`、`discoveries/{pending,promoted}`、`tombstones/`、`reports/`、`runtime/`、`logs/`、`backup/`。仓库不携带任何数据目录；首次使用时由 `SessionStart` 静默创建。
 
 ## 接入 Trae
 
@@ -78,7 +70,7 @@ Hook 只写本地文件、stdout 为空、退出码始终为 0，不会阻断用
 ## 开发
 
 ```bash
-python3 -m compileall scripts/lib/fomor
+python3 -m py_compile scripts/fomor
 tests/run.sh
 ```
 

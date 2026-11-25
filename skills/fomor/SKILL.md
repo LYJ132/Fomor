@@ -17,7 +17,9 @@ Fomor 是一个本地探索助手：采集你在 Trae 中提出的问题，每�
 UserPromptSubmit Hook            SessionStart Hook
         │                              │
         ▼                              ▼
-  events/ 追加问题            catch-up：补跑错过的 03:00
+  events/ 追加问题            ① 并行校验环境（Python、目录、settings）
+                              ② 缺失项静默补齐，无第三方依赖则不下载
+                              ③ catch-up：补跑错过的 03:00
         │                              │
         └──────────► 03:00 分析 ◄──────┘
                         │
@@ -35,9 +37,8 @@ UserPromptSubmit Hook            SessionStart Hook
 
 | 目录 | 放什么 | 运行时是否读取 |
 | --- | --- | --- |
-| `scripts/fomor` | 唯一可执行入口（无扩展名） | Hook 与分析命令调用 |
-| `scripts/lib/fomor/` | Python 包（采集、存储、反馈、调度、管线） | 是 |
-| `hooks/hooks.json` | Hook 事件绑定 | 平台加载 |
+| `scripts/fomor` | 唯一可执行入口（单文件，无扩展名） | Hook 与分析命令调用 |
+| `hooks/hooks.json` | Hook 事件绑定：采集 + SessionStart 环境校验 | 平台加载 |
 | `references/` | 静态参考：提示词契约、数据模型 | 代码与 Agent 按需读取 |
 | `skills/` | Agent 操作流程（本文件） | 平台加载 |
 | `docs/` | 维护者文档（PRD、调研、问题清单） | 否 |
@@ -52,21 +53,20 @@ UserPromptSubmit Hook            SessionStart Hook
 ## 安装（一次性）
 
 1. 确认 Python：`python3 --version`，需要 3.10+。
-2. 初始化本地数据目录：
+2. 数据目录不需要手动创建：`SessionStart` 的 `session-start` 会在首次会话时静默校验并补齐 `~/.fomor/`、`config/settings.json` 与各子目录；默认根目录为 `~/.fomor`，可用 `FOMOR_HOME` 覆盖，权限 `0700`。需要提前初始化或排查时可手动执行：
 
    ```bash
    scripts/fomor init
+   scripts/fomor session-start --verbose   # 查看环境校验报告
    ```
-
-   默认 `~/.fomor`，可用 `FOMOR_HOME` 覆盖。目录权限应为 `0700`。
 
 3. 接入 Hook。插件安装时会加载 `hooks/hooks.json`；若 Trae 未自动加载，把该文件内容复制到全局 `hooks.json`，将 `${TRAE_PLUGIN_ROOT}` 替换为仓库绝对路径，然后在「设置 > Hooks」启用并接受安全提示。项目级 Hook 还需要信任当前工作区。
    - `UserPromptSubmit` → `scripts/fomor hook`
-   - `SessionStart` → `scripts/fomor catch-up`
+   - `SessionStart` → `scripts/fomor session-start`
 
 4. 在 Trae「自动化」中创建任务：名称 `Fomor 每日探索`，每天 03:00，**本地运行**，任务内容为「使用 fomor 技能执行今日分析并展示报告」。
 
-   本地任务要求电脑保持唤醒。睡眠期间不会执行，由 `SessionStart` 的 `catch-up` 在下次唤醒时补跑。
+   本地任务要求电脑保持唤醒。睡眠期间不会执行，由 `SessionStart` 的 `session-start` 在下次唤醒时补跑。
 
 5. 自检：
 

@@ -1,6 +1,6 @@
 {
   "name": "fomor",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A local exploration assistant for Trae: collect the questions you ask, understand what you are working on, and daily propose alternative solution paths. Long-term memory stays in ~/.fomor; nothing is injected into your agent session.",
   "author": {
     "name": "LYJ132"

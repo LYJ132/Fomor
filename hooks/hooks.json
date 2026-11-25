@@ -17,8 +17,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${TRAE_PLUGIN_ROOT}/scripts/fomor\" catch-up",
-            "commandWindows": "python \"${TRAE_PLUGIN_ROOT}/scripts/fomor\" catch-up",
+            "command": "python3 \"${TRAE_PLUGIN_ROOT}/scripts/fomor\" session-start",
+            "commandWindows": "python \"${TRAE_PLUGIN_ROOT}/scripts/fomor\" session-start",
             "timeout": 10
           }
         ]

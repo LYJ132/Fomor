@@ -987,8 +987,7 @@ fomor/
 ├── hooks/
 │   └── hooks.json             # UserPromptSubmit 采集 + SessionStart 补跑
 ├── scripts/
-│   ├── fomor                  # 唯一可执行入口
-│   └── lib/fomor/             # Python 包
+│   └── fomor                  # 唯一可执行入口（单文件）
 ├── references/                # 提示词契约与数据模型
 └── skills/
     └── fomor/

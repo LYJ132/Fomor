@@ -392,8 +392,7 @@ fomor/
 ├── hooks/
 │   └── hooks.json             # UserPromptSubmit 采集 + SessionStart 补跑
 ├── scripts/
-│   ├── fomor                  # 唯一可执行入口（无扩展名）
-│   └── lib/fomor/             # Python 包
+│   └── fomor                  # 唯一可执行入口（单文件）
 ├── references/                # 静态参考：提示词契约、数据模型
 ├── skills/
 │   └── fomor/SKILL.md         # 完整 SOP（不拆步骤）
@@ -566,8 +565,7 @@ fomor/
 ├── hooks/
 │   └── hooks.json
 ├── scripts/
-│   ├── fomor
-│   └── lib/fomor/
+│   └── fomor
 ├── references/
 └── skills/
     └── fomor/

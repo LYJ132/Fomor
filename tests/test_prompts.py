@@ -1,3 +1,4 @@
+import support  # noqa: F401
 import unittest
 
 from fomor.prompts import build_prompt, describe_tasks, load_system
