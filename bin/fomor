@@ -1,0 +1,5 @@
+#!/bin/sh
+# Stable launcher so Trae hooks can call Fomor from any working directory.
+# Resolves the repository root from this script's location, then runs the CLI.
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m fomor "$@"

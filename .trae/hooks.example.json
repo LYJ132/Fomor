@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/fomor/bin/fomor hook",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/fomor/bin/fomor catch-up",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

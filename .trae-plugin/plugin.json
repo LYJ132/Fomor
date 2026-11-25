@@ -1,0 +1,34 @@
+{
+  "name": "fomor",
+  "version": "0.1.0",
+  "description": "A local exploration assistant that reads your Trae prompts, understands what you are working on, and daily proposes alternative solution paths.",
+  "author": {
+    "name": "Fomor"
+  },
+  "license": "MIT",
+  "keywords": [
+    "exploration",
+    "solution-discovery",
+    "trae-hooks",
+    "automation",
+    "local-memory"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Fomor",
+    "shortDescription": "Daily exploration of alternative solution paths based on your Trae prompts",
+    "longDescription": "Fomor collects the questions you send in Trae through a lightweight UserPromptSubmit hook, analyzes them daily at 03:00 with a Trae automation task, and writes a discovery report to ~/.fomor. Questions you keep asking about are promoted into long-term topics; ignored discoveries expire automatically. It never injects content into your agent session.",
+    "developerName": "Fomor",
+    "category": "development_tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Set up Fomor for this workspace",
+      "Show me what Fomor explored recently"
+    ],
+    "brandColor": "#3B82F6",
+    "screenshots": []
+  }
+}
