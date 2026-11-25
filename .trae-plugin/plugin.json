@@ -1,34 +1,41 @@
 {
   "name": "fomor",
-  "version": "0.1.0",
-  "description": "A local exploration assistant that reads your Trae prompts, understands what you are working on, and daily proposes alternative solution paths.",
+  "version": "0.2.0",
+  "description": "A local exploration assistant for Trae: collect the questions you ask, understand what you are working on, and daily propose alternative solution paths. Long-term memory stays in ~/.fomor; nothing is injected into your agent session.",
   "author": {
-    "name": "Fomor"
+    "name": "LYJ132"
   },
+  "repository": "https://github.com/LYJ132/Fomor",
+  "homepage": "https://github.com/LYJ132/Fomor",
   "license": "MIT",
   "keywords": [
     "exploration",
     "solution-discovery",
     "trae-hooks",
     "automation",
-    "local-memory"
+    "local-memory",
+    "skills"
   ],
   "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Fomor",
     "shortDescription": "Daily exploration of alternative solution paths based on your Trae prompts",
     "longDescription": "Fomor collects the questions you send in Trae through a lightweight UserPromptSubmit hook, analyzes them daily at 03:00 with a Trae automation task, and writes a discovery report to ~/.fomor. Questions you keep asking about are promoted into long-term topics; ignored discoveries expire automatically. It never injects content into your agent session.",
-    "developerName": "Fomor",
-    "category": "development_tools",
+    "developerName": "LYJ132",
+    "category": "Developer Tools",
     "capabilities": [
+      "Interactive",
       "Read",
       "Write"
     ],
     "defaultPrompt": [
       "Set up Fomor for this workspace",
+      "Run today's Fomor analysis",
       "Show me what Fomor explored recently"
     ],
     "brandColor": "#3B82F6",
+    "websiteURL": "https://github.com/LYJ132/Fomor",
     "screenshots": []
   }
 }

@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""Fomor command line entry point.
+
+Extensionless on purpose, matching the plugin convention: this file is the
+executable CLI (`scripts/fomor ...`), while the importable package lives in
+`scripts/lib/fomor/`.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+
+from fomor.cli import main  # noqa: E402
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

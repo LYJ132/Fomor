@@ -53,10 +53,10 @@ def catch_up(
     if not is_due(paths, config, moment):
         return {"status": "not_due", "checked_at": to_iso(moment)}
 
+    repo_root = Path(__file__).resolve().parents[3]
     command = [
         sys.executable,
-        "-m",
-        "fomor",
+        str(repo_root / "scripts" / "fomor"),
         "analyze",
         "--scheduled",
         "--home",
@@ -66,13 +66,7 @@ def catch_up(
         return {"status": "running_inline", "command": command}
 
     paths.ensure()
-    # ``python -m fomor`` needs the package importable no matter where the
-    # SessionStart hook ran.  Point PYTHONPATH at the repository root.
-    package_root = Path(__file__).resolve().parent.parent
     env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(
-        [str(package_root), env["PYTHONPATH"]] if env.get("PYTHONPATH") else [str(package_root)]
-    )
     log_path = paths.logs_dir / "catchup.log"
     handle = log_path.open("a", encoding="utf-8")
     handle.write(f"\n[{to_iso(moment)}] catch-up start\n")
@@ -82,7 +76,7 @@ def catch_up(
         stdout=handle,
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
-        cwd=str(package_root),
+        cwd=str(repo_root),
         env=env,
         start_new_session=True,
         close_fds=True,

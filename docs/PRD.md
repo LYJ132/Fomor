@@ -984,10 +984,15 @@ Windows：%userprofile%\.fomor\
 fomor/
 ├── .trae-plugin/
 │   └── plugin.json
-├── skills/
-│   └── fomor-analyze/
-│       └── SKILL.md
-└── bin/                       # 可选：Hook 采集小工具
+├── hooks/
+│   └── hooks.json             # UserPromptSubmit 采集 + SessionStart 补跑
+├── scripts/
+│   ├── fomor                  # 唯一可执行入口
+│   └── lib/fomor/             # Python 包
+├── references/                # 提示词契约与数据模型
+└── skills/
+    └── fomor/
+        └── SKILL.md           # 完整 SOP，不按步骤拆分
 ```
 
 数据目录：

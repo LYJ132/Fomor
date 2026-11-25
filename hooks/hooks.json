@@ -1,12 +1,12 @@
 {
-  "version": 1,
   "hooks": {
     "UserPromptSubmit": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "/absolute/path/to/fomor/bin/fomor hook",
+            "command": "python3 \"${TRAE_PLUGIN_ROOT}/scripts/fomor\" hook",
+            "commandWindows": "python \"${TRAE_PLUGIN_ROOT}/scripts/fomor\" hook",
             "timeout": 10
           }
         ]
@@ -17,7 +17,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/absolute/path/to/fomor/bin/fomor catch-up",
+            "command": "python3 \"${TRAE_PLUGIN_ROOT}/scripts/fomor\" catch-up",
+            "commandWindows": "python \"${TRAE_PLUGIN_ROOT}/scripts/fomor\" catch-up",
             "timeout": 10
           }
         ]

@@ -293,14 +293,11 @@ disable-model-invocation: false
 
 ### 6.3 与 Fomor 的结合
 
-建议提供 2–3 个 Skill，而不是一个大而全的 Skill：
+**只提供一个 Skill，不按步骤拆分。** 安装、Hook 自检、每日分析、查看结果、排障属于同一条 SOP；拆成多个 Skill 会让 Agent 需要跨多个目录才能还原完整流程。
 
 | Skill | 触发场景 | 作用 |
 | --- | --- | --- |
-| `fomor-setup` | 用户说「安装/配置 Fomor」 | 检查 Hook、数据目录、权限，输出安装状态 |
-| `fomor-review` | 用户说「看看最近有什么探索」 | 读取本地 Discovery 并渲染摘要 |
-| `fomor-review` | 用户说「看看最近有什么探索」 | 读取本地 pending/reports 并渲染摘要 |
-| `fomor-feedback` | 后续可选 | 手动写反馈；当前版本由次日回看自动推断，不提供入口 |
+| `fomor` | 安装/配置、执行分析、查看探索、排障 | 完整 SOP 与 Reference Index；分析计算仍由 `scripts/fomor` 完成 |
 
 Skill 的定位是**交互入口与流程说明**，不承担后台计算。
 
@@ -352,7 +349,7 @@ plugin/
   "binaries": [
     {
       "name": "fomor-cli",
-      "path": "bin/fomor",
+      "path": "bin/fomor-cli",
       "required": true,
       "executable": true,
       "platforms": {
@@ -378,7 +375,7 @@ plugin/
 
 ### 7.3 未观察到 / 未公开的部分
 
-- **`plugin.json` 中没有发现 `hooks` 字段**；
+- **`plugin.json` 中没有观察到 `hooks` 字段**（Fomor 仍按主流插件约定写入 `hooks` 字段并随包提供 `hooks/hooks.json`，但 Trae 是否加载属于未验证项）；
 - 没有公开文档说明插件可以自动写入 `~/.trae-cn/hooks.json` 或在安装时启用 Hook；
 - 没有公开文档说明 `binaries` 能否被 Hook 直接调用、升级时是否保留；当前版本不依赖二进制常驻。
 
@@ -386,23 +383,31 @@ plugin/
 
 ### 7.4 对 Fomor 的打包建议
 
+采用与主流 Agent 插件一致的分层：可执行逻辑、Hook 绑定、静态参考、Agent SOP 各自独立。
+
 ```text
 fomor/
 ├── .trae-plugin/
-│   └── plugin.json            # 清单：skills（+ 可选 binaries）
-├── INSTRUCTIONS.md            # 采集范围、隐私、使用入口
+│   └── plugin.json            # 清单：skills + hooks
+├── hooks/
+│   └── hooks.json             # UserPromptSubmit 采集 + SessionStart 补跑
+├── scripts/
+│   ├── fomor                  # 唯一可执行入口（无扩展名）
+│   └── lib/fomor/             # Python 包
+├── references/                # 静态参考：提示词契约、数据模型
 ├── skills/
-│   ├── fomor-setup/SKILL.md   # 安装与 Hook 自检
-│   └── fomor-analyze/SKILL.md # 自动化任务调用的分析流程
-└── bin/                       # 可选：Hook 采集小工具
-    ├── fomor-linux-x64
-    ├── fomor-darwin-arm64
-    └── fomor-win32-x64.exe
+│   └── fomor/SKILL.md         # 完整 SOP（不拆步骤）
+└── docs/                      # 维护者文档，不进入运行时
 ```
 
-用户数据不放在插件包内，统一写到 `~/.fomor/`（见 11.4）。
+约定：
 
-插件负责「被发现、被安装、被调用」；Hook 注册由 `fomor-setup` Skill 或采集小工具引导完成；当前版本不包含 MCP Server。
+- 可执行逻辑只放 `scripts/` 与 `hooks/`；
+- `references/` 只放「读」的内容，不放可执行代码；
+- 同一个 SOP 只写一个 Skill；
+- 用户数据不放在插件包内，统一写到 `~/.fomor/`（见 11.4）。
+
+插件负责「被发现、被安装、被调用」。`plugin.json` 通过 `hooks` 字段引用 `hooks/hooks.json`；但由于 Trae 是否自动加载插件 Hook 尚未验证，安装引导仍需保留“复制到全局 hooks.json 并替换为绝对路径”的兜底步骤。
 
 ---
 
@@ -558,10 +563,15 @@ flowchart LR
 fomor/
 ├── .trae-plugin/
 │   └── plugin.json
-├── skills/
-│   └── fomor-analyze/
-│       └── SKILL.md
-└── bin/                     # 可选：Hook 采集小工具
+├── hooks/
+│   └── hooks.json
+├── scripts/
+│   ├── fomor
+│   └── lib/fomor/
+├── references/
+└── skills/
+    └── fomor/
+        └── SKILL.md
 ```
 
 用户数据放在用户主目录的独立目录：
