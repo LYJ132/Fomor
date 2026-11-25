@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fomor"
+version = "0.1.0"
+description = "AI exploration assistant that discovers alternative solutions behind your daily questions"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+fomor = "fomor.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["fomor*"]
