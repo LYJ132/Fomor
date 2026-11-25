@@ -8,14 +8,14 @@
 
 ## 一、结论先行
 
-1. **采集链路成立，但需要「插件 + Hook」两段式。** Trae 的 `UserPromptSubmit` Hook 能在用户发送消息后、智能体处理前拿到 `prompt` 与 `session_id`，这正是 PRD 需要的 UserMessage Hook。但 Hook 配置需要在设置中显式创建/启用，项目 Hook 还要求目录信任，**插件包能否自动安装 Hook 目前没有公开依据，必须验证**。
-2. **Trae 的插件不是「常驻后台服务」。** 插件市场中的插件以 Skills + MCP Server + Connector + 多平台二进制为主，适合「被调用」；PRD 需要的「定时分析、长期运行」必须由自带的本地服务/CLI 承担，并解决安装、开机启动、退出与升级问题。
+1. **采集链路成立，采用「插件 + Hook + 自动化任务」三段式。** Trae 的 `UserPromptSubmit` Hook 能在用户发送消息后、智能体处理前拿到 `prompt` 与 `session_id`，这正是 PRD 需要的 UserMessage Hook。但 Hook 配置需要在设置中显式创建/启用，项目 Hook 还要求目录信任，**插件包能否自动安装 Hook 目前没有公开依据，必须验证**。
+2. **Trae 自带「自动化任务」，可以替代自建调度器。** 插件市场中的插件以 Skills + MCP Server + Connector + 多平台二进制为主，适合「被调用」；但 Agent 窗口提供 Automation（固定时间/间隔/自然语言触发、本地或云端运行、执行历史）。**Fomor 不需要自建常驻服务，把定时分析交给自动化任务即可。**
 3. **会话上下文读取是当前最大的不确定项。** CLI 的会话以本地 JSONL 形式存在（第三方资料），IDE 侧只有本地数据目录线索，**没有公开 API**。如果无法稳定按 `session_id` 读取，MVP 应直接砍掉「按需读取会话历史」，保留不确定性输出。
-4. **交付形态可以比 PRD 设想的更轻。** 除了独立 APP / IM，Trae 支持 MCP，可以把 Discovery 浏览与反馈做成 Trae 内的 MCP 工具；这对 MVP 的成本最低，也最贴近用户工作现场。
+4. **交付可以只依赖自动化任务输出。** 当前版本不需要独立 APP、IM 或 MCP 面板：Discovery 直接生成在自动化任务的对话流中，用户在执行历史里回看。
 
 一句话建议：
 
-> 用 **Trae 插件承载「入口与展示」**（Skills + MCP + 安装器），用 **本地常驻服务承载「采集、分析、记忆」**，用 **Hook 承载「无感采集」**。三者通过本地 JSON/HTTP 解耦。
+> 用 **Trae Hook 做采集**，用 **Trae 自动化任务做调度与分析**，用 **插件目录下的 `data/` 文件做长期记忆**，结果直接输出到自动化任务对话流。
 
 ---
 
@@ -26,7 +26,7 @@
 | Trae 官方文档（中文/英文） | Hooks、Skills、插件市场、MCP、记忆、CLI、模式与窗口 | 高 |
 | 本地已安装的官方插件包 | `.trae-plugin/plugin.json`、`.mcp.json`、`connector.json` 等实际结构 | 高（但属于实现观察，不是规范承诺） |
 | 第三方逆向/社区资料 | CLI 会话存储路径（`~/.trae/cli/sessions/...`） | 中，需实测 |
-| 未找到公开依据的部分 | 插件能否携带 Hook、IDE 会话历史读取接口、插件二进制常驻生命周期 | 低，列为待验证 |
+| 未找到公开依据的部分 | 插件能否携带 Hook、IDE 会话历史读取接口、自动化任务云端能否访问本地 `data/`、插件升级是否保留 `data/` | 低，列为待验证 |
 
 > 注意：Trae 同时存在国内版与国际版，配置目录存在 `~/.trae-cn` 与 `~/.trae` 的差异。下文同时标注。
 
@@ -49,8 +49,47 @@
 | IDE 窗口 | 适合 | Hook 配置、工作区、Skills 都围绕 IDE/Agent 会话；开发者也主要在这里 |
 | Agent 窗口 | 适合 | 用户任务发生地，会话更集中 |
 | SOLO / Trae Work | 需单独评估 | 有独立 Skills 体系（`SKILL.md`）与任务模型，Hook 能力需确认 |
-| Trae CLI | 适合做「后台分析引擎」或辅助采集 | 提供非交互 `exec`、`resume`、`mcp-server`、`app-server` |
+| Trae CLI | 可选：调试与批量评测 | 提供非交互 `exec`、`resume`、`mcp-server`、`app-server` |
 | 移动/Web | 不适合首发 | 采集与本地文件能力受限 |
+
+### 3.3 自动化任务（Automation）
+
+Trae 的 Agent 窗口与 TraeWork 均提供「自动化」能力，可以创建定时任务，按设定时间或频率自动执行预设任务并生成结果。
+
+**触发方式**
+
+- 固定时间：每天 / 每周 / 每月的固定时间点；
+- 间隔触发：按分钟 / 小时 / 天的固定间隔循环；
+- 自定义：用自然语言描述（如「工作日早上 9 点」），仅「在对话中创建」方式支持。
+
+**创建方式**
+
+| 方式 | 说明 |
+| --- | --- |
+| 在对话中创建 | 输入「任务内容 + 执行时间」，AI 解析并创建；运行模式默认当前 Work/Code 模式且不可改 |
+| 手动新建 | 配置任务名称、触发时间、任务内容、运行模式（Work/Code）、运行环境（云端/本地）、输出内容存储位置 |
+| 从模板创建 | 使用内置模板（如每日简报、周报、竞品追踪）后修改 |
+
+**执行与限制**
+
+- 本地任务仅在电脑保持唤醒时运行；云端任务可在电脑锁屏或睡眠状态下运行；
+- 任务创建后，**运行模式、运行环境、输出内容存储位置不可修改**，只能删除重建；
+- 可在「执行历史」查看记录，点击记录跳转到对应对话流；
+- 任务每次执行通常生成独立的对话记录，不应依赖上一次任务会话的上下文。
+
+**对 Fomor 的含义**
+
+| 需求 | 自动化任务能否承担 | 备注 |
+| --- | --- | --- |
+| 每天定时触发分析 | ✅ | 固定时间或间隔均可 |
+| 长时间无人值守 | ⚠️ | 本地需电脑唤醒；云端可锁屏运行，但可能读不到本地 `data/` |
+| 读取 Hook 写入的本地事件 | ⚠️ | 取决于运行环境；本地最稳 |
+| 生成并展示 Discovery | ✅ | 直接输出在任务对话流 |
+| 持久化 Topic / Discovery | ✅ | 由任务中的脚本/Skill 写回 `data/` |
+| 收集结构化反馈 | ❌ | 任务输出是单向的，需要额外 Skill/命令 |
+| 修改任务配置 | ⚠️ | 运行环境、模式、输出位置创建后不可改 |
+
+推荐配置：**任务内容调用 Fomor 分析 Skill；触发时间每天一次；运行环境选本地；输出位置指向插件 `data/` 或工作区可读路径。**
 
 ---
 
@@ -59,12 +98,13 @@
 | 能力 | 作用 | 与 Fomor 的关系 |
 | --- | --- | --- |
 | **Hooks** | 在会话生命周期节点执行 Shell，读写 JSON | **采集主通道**（UserPromptSubmit） |
+| **自动化任务** | 定时/间隔触发 Agent 任务，生成结果与执行历史 | **调度与输出主通道** |
 | **Skills** | `SKILL.md` 封装的指令/脚本/资源，按需加载 | 安装引导、手动触发探索、查看报告 |
 | **插件市场** | 分发插件（可含 Skills、MCP、Connector、binaries） | **分发入口** |
-| **MCP** | 向 Agent 暴露工具/资源 | **Trae 内查看 Discovery / 提交反馈** |
+| **MCP** | 向 Agent 暴露工具/资源 | 后续可选（当前版本不做） |
 | **自定义智能体 / Subagent** | 配置 Prompt、MCP、工具 | 可选的「探索执行器」，但非必需 |
 | **Rules / Memories / Commands** | 规则、记忆、斜杠命令 | 可复用的偏好与入口；不建议把 Topic 存进 Memory |
-| **CLI** | 非交互执行、会话恢复、插件管理、MCP/ACP/App Server | **后台分析引擎 / 守护进程 / 调试工具** |
+| **CLI** | 非交互执行、会话恢复、插件管理、MCP/ACP/App Server | **调试/评测工具**，非当前运行必需 |
 | **连接器（Connector）** | OAuth 等第三方授权 | 仅当 Fomor 需要外部服务时使用 |
 
 ---
@@ -82,7 +122,7 @@
 | `Stop` | 智能体准备结束当前 Query | 可选：作为「一轮结束」信号，触发本地队列 flush |
 | `Notification` | 等待确认或任务完成，异步不阻塞 | 可选：作为提醒/交付时机 |
 
-**关键缺口：没有 `SessionEnd`。** 因此「每天分析」不能依赖会话结束事件，必须自建调度（常驻进程 / 系统定时任务 / 下次启动补跑）。
+**关键缺口：没有 `SessionEnd`。** 因此「每天分析」不能依赖会话结束事件。当前方案是交给 **Trae 自动化任务**（固定时间/间隔触发），Hook 侧只负责把事件快速落盘。
 
 ### 5.2 配置位置
 
@@ -166,7 +206,7 @@
 | 工作目录 | 全局 Hook：单工作区为根目录，多工作区为第一个工作区根目录；项目 Hook：配置文件所在项目根目录 |
 | 运行方式 | **沙箱运行**（受限）或 **本地自动运行**（可访问本地环境，有安全风险） |
 
-**对 Fomor 的含义**：若采集到 `~/.fomor`、并需要后续由常驻服务处理，通常需要「本地自动运行」；这会触发平台安全警示，影响安装体验。必须在 MVP 前实测沙箱能否写入用户目录（Q-PLAT-08）。
+**对 Fomor 的含义**：采集事件写入插件目录下的 `data/`；分析由自动化任务执行，不需要常驻服务。但 Hook 通常需要「本地自动运行」才能写插件目录，这会触发平台安全警示，影响安装体验。必须在 MVP 前实测沙箱能否写入该目录（Q-PLAT-08）。
 
 ### 5.7 安全与运维
 
@@ -331,34 +371,40 @@ plugin/
 
 - **`plugin.json` 中没有发现 `hooks` 字段**；
 - 没有公开文档说明插件可以自动写入 `~/.trae-cn/hooks.json` 或在安装时启用 Hook；
-- 没有公开文档说明 `binaries` 启动后是否允许常驻、如何随 Trae 退出、如何升级。
+- 没有公开文档说明 `binaries` 能否被 Hook 直接调用、升级时是否保留；当前版本不依赖二进制常驻。
 
 > 这三点直接决定 Fomor 的安装体验与后台运行模型，必须优先做实验（Q-PLAT-02 / Q-PLAT-11）。
 
 ### 7.4 对 Fomor 的打包建议
 
 ```text
-fomor-plugin/
+fomor/
 ├── .trae-plugin/
-│   └── plugin.json            # 清单：skills + mcp + binaries
-├── INSTRUCTIONS.md            # 简要说明：采集范围、隐私、入口
+│   └── plugin.json            # 清单：skills（+ 可选 binaries）
+├── INSTRUCTIONS.md            # 采集范围、隐私、使用入口
 ├── skills/
-│   ├── fomor-setup/SKILL.md
-│   ├── fomor-review/SKILL.md
-│   └── fomor-feedback/SKILL.md
-├── .mcp.json                  # 只读查询 + 反馈写入
-├── bin/
-│   ├── fomor-linux-x64
-│   ├── fomor-darwin-arm64
-│   └── fomor-win32-x64.exe
-└── assets/
+│   ├── fomor-setup/SKILL.md   # 安装与 Hook 自检
+│   └── fomor-analyze/SKILL.md # 自动化任务调用的分析流程
+├── data/                      # 长期记忆（用户数据，升级需保留）
+│   ├── config/
+│   ├── events/
+│   ├── topics/
+│   ├── discoveries/
+│   ├── runtime/
+│   └── logs/
+└── bin/                       # 可选：Hook 采集小工具
+    ├── fomor-linux-x64
+    ├── fomor-darwin-arm64
+    └── fomor-win32-x64.exe
 ```
 
-插件负责「被发现、被安装、被调用」；Hook 与守护进程由 `fomor` 二进制自行安装/管理，并在插件首次运行时引导用户完成授权。
+插件负责「被发现、被安装、被调用」；Hook 注册由 `fomor-setup` Skill 或采集小工具引导完成；当前版本不包含 MCP Server。
 
 ---
 
-## 八、MCP：最低成本的「Trae 内交付」
+## 八、MCP：后续可选的「Trae 内交付」（当前版本不做）
+
+> 当前版本已确定只用自动化任务输出。MCP 仅作为后续可选形态保留，下面是能力备忘。
 
 ### 8.1 Trae 对 MCP 的支持
 
@@ -464,59 +510,60 @@ fomor-plugin/
 
 ## 十一、Fomor 在 Trae 上的落地架构
 
-### 11.1 三种方案对比
+### 11.1 四种方案对比
 
-| 方案 | 组成 | 能否主动采集 | 能否后台分析 | 安装成本 | 结论 |
+| 方案 | 组成 | 能否主动采集 | 能否定时分析 | 安装成本 | 结论 |
 | --- | --- | --- | --- | --- | --- |
 | A. 纯插件 | Skills + MCP | 否（只能被调用） | 否 | 低 | 不满足 PRD 核心 |
-| B. 插件 + Hook | Skills + MCP + Hook 安装器 | 是 | 否（Hook 非常驻） | 中 | 采集可行，分析需另解 |
-| C. 插件 + Hook + 本地服务 | 插件（入口/展示）+ Hook（采集）+ 常驻服务（分析/记忆） | 是 | 是 | 高 | **推荐**，最符合 PRD |
+| B. 插件 + Hook | Skills + Hook 安装器 | 是 | 否 | 中 | 采集可行，分析需另解 |
+| C. 插件 + Hook + 本地服务 | 插件 + Hook + 常驻服务 | 是 | 是 | 高 | 能力完整，但需要守护进程与升级维护 |
+| **D. 插件 + Hook + 自动化任务** | 插件（Skills + `data/`）+ Hook（采集）+ Trae 自动化任务（调度/分析/输出） | 是 | 是 | 中 | **当前选择**：无自建守护进程，交付仅靠任务输出 |
 
 ### 11.2 推荐架构
 
 ```mermaid
 flowchart LR
     U[用户在 Trae 中提问] --> H[UserPromptSubmit Hook]
-    H -->|JSONL 追加| Q[(本地事件队列)]
-    Q --> S[Fomor 本地服务]
-    S -->|每日/触发式| C[Discovery Core]
-    C -->|模型/搜索| X[LLM + Search Provider]
-    C --> M[(JSON: Topics / Discoveries)]
-    M --> P[Trae 插件 MCP Server]
-    P -->|工具调用| U2[用户在 Trae 内查看/反馈]
-    M --> N[可选: 系统通知 / IM]
-    U2 -->|反馈| S
+    H -->|JSONL 追加| E[(插件 data/events)]
+    T[Trae 自动化任务<br/>每天定时] --> C[Discovery Core<br/>Skill / 脚本]
+    E --> C
+    M[(插件 data/topics<br/>data/discoveries)] --> C
+    C -->|写回| M
+    C -->|本次结果| O[自动化任务对话流]
+    O --> V[用户在执行历史中查看]
 ```
 
 ### 11.3 PRD 模块到 Trae 机制的映射
 
 | PRD 模块 | Trae 机制 | 说明 |
 | --- | --- | --- |
-| Collection Runtime | `UserPromptSubmit` Hook + 本地小二进制 | Hook 只负责快速落盘；去重、补采在服务侧 |
-| Discovery Core | 本地常驻服务（Python/Node/Go） | 可调用 `traecli exec` 或自有模型 API |
-| Memory Runtime | 本地 JSON（`~/.fomor`） | 不使用 Trae Memory 作为主存储 |
-| Delivery Runtime | MCP Server（Trae 内）+ 可选通知/IM | MCP 负责查看与反馈；通知单独实现 |
+| Collection Runtime | `UserPromptSubmit` Hook + 采集小工具 | Hook 只负责快速落盘；去重、补采在分析阶段处理 |
+| Discovery Core | Trae 自动化任务中的 Skill/脚本 | 可调用模型与搜索；不常驻 |
+| Memory Runtime | 插件 `data/` 下的 JSON/JSONL | 不使用 Trae Memory，也不引入数据库 |
+| Delivery Runtime | 自动化任务输出 | 对话流 + 执行历史；当前不做 APP/IM/MCP |
 | 平台适配层 | `platform=trae` 的 Hook 适配器 | 未来可扩展到其他 Agent 平台 |
 
-### 11.4 建议的本地目录
+### 11.4 建议的插件目录
 
 ```text
-~/.fomor/
-├── config/
-│   ├── settings.json
-│   └── preferences.json
-├── events/
-│   └── 2026-11-25.jsonl
-├── topics/
-├── discoveries/
-├── runtime/
-│   ├── tasks.json
-│   └── state.json
-├── logs/
-└── bin/            # 由插件安装的 fomor 二进制
+fomor/
+├── .trae-plugin/
+│   └── plugin.json
+├── skills/
+│   └── fomor-analyze/
+│       └── SKILL.md
+├── data/                    # 长期记忆（用户数据）
+│   ├── config/
+│   ├── events/
+│   │   └── 2026-11-25.jsonl
+│   ├── topics/
+│   ├── discoveries/
+│   ├── runtime/
+│   └── logs/
+└── bin/                     # 可选：Hook 采集小工具
 ```
 
-与 PRD 的差别：Event 用 JSONL 追加，避免每日 JSON 数组重写导致并发问题；Topic/Discovery 仍用独立 JSON 文件。
+与 PRD 的差别：Event 用 JSONL 追加，避免每日 JSON 数组重写导致并发问题；Topic/Discovery 仍用独立 JSON 文件。`data/` 是用户数据，升级时必须保留（见 Q-MEM-10）。
 
 ---
 
@@ -525,19 +572,22 @@ flowchart LR
 | # | 约束/风险 | 影响 | 缓解 |
 | --- | --- | --- | --- |
 | 1 | Hook 需手动启用 + 目录信任 | 安装转化率低 | 安装器检测 + 一键跳转设置 + 状态自检 Skill |
-| 2 | 插件包未见 `hooks` 字段 | 无法随插件自动注册采集 | 由 `fomor` 二进制写入/合并 `hooks.json`，或引导手动配置 |
-| 3 | Hook 默认 30s 超时 | 长任务会失败甚至影响会话 | Hook 只落盘；分析全部异步 |
+| 2 | 插件包未见 `hooks` 字段 | 无法随插件自动注册采集 | 由采集小工具写入/合并 `hooks.json`，或引导手动配置 |
+| 3 | Hook 默认 30s 超时 | 长任务会失败甚至影响会话 | Hook 只落盘；分析全部交给自动化任务 |
 | 4 | Hook 退出码 2 会阻断用户请求 | 严重体验事故 | 采集 Hook 永不返回 2；加保护开关 |
 | 5 | Hook 合并执行 | 重复 Event | 全局去重键 + 安装器避免重复注册 |
-| 6 | 无 `SessionEnd` | 无法用会话结束触发分析 | 自建调度/补跑 |
-| 7 | 沙箱模式限制文件与进程 | 无法写用户目录或启动服务 | 需要本地自动运行；安装时明确说明 |
+| 6 | 无 `SessionEnd` | 无法用会话结束触发分析 | 已用 Trae 自动化任务解决 |
+| 7 | 沙箱模式限制文件与进程 | 无法写插件 `data/` | 需要本地自动运行；安装时明确说明 |
 | 8 | 国内外路径不同 | 安装器/文档分裂 | 运行时探测 `~/.trae-cn` / `~/.trae` |
 | 9 | IDE 会话历史无公开接口 | 按需上下文不可用 | MVP 降级为「只记录问题」，输出保留不确定性 |
-| 10 | 插件二进制常驻生命周期未知 | 后台服务可能被 Trae 退出带走 | 独立守护（launchd/systemd/计划任务），或随系统启动 |
-| 11 | MCP 只能被调用 | 无法主动推送 | 结合 Notification Hook 或系统通知 |
-| 12 | 模型成本/限流未知（`exec`） | 每日分析可能失败 | 预算控制、降级、缓存 |
-| 13 | 隐私：Hook 读取用户输入 | 信任风险 | 明确采集范围、脱敏、可查看/清空 |
-| 14 | 平台能力可能变化 | 长期维护成本 | 适配层隔离 + 版本探测 + 回归实验 |
+| 10 | 自动化任务本地运行需电脑唤醒 | 用户关机/休眠当天不执行 | 下次运行扩大分析窗口补跑；或接受漏跑 |
+| 11 | 自动化任务云端运行可能读不到本地 `data/` | 记忆与输出断裂 | 默认选本地；必须实测云端数据可达性 |
+| 12 | 自动化任务的运行环境/模式/输出位置创建后不可改 | 选错只能重建 | 安装引导中固定推荐配置；提供检查清单 |
+| 13 | 自动化任务输出是单向的 | 没有结构化反馈，长期记忆更新困难 | MVP 接受；后续增加反馈 Skill/命令 |
+| 14 | 插件升级可能覆盖插件目录 | `data/` 长期记忆丢失 | 实验验证；升级前备份；必要时迁移到用户目录 |
+| 15 | 模型成本/限流未知 | 每日分析可能失败 | 预算控制、降级、缓存 |
+| 16 | 隐私：Hook 读取用户输入 | 信任风险 | 明确采集范围、脱敏、可查看/清空 |
+| 17 | 平台能力可能变化 | 长期维护成本 | 适配层隔离 + 版本探测 + 回归实验 |
 
 ---
 
@@ -547,13 +597,15 @@ flowchart LR
 | --- | --- | --- | --- |
 | 1 | 在 IDE/Agent 窗口配置 `UserPromptSubmit`，打印 stdin | `prompt` 是否完整？`session_id` 是否稳定？ | 若不含附件，只记录文本并在 UI 标注 |
 | 2 | 同时配置全局 + 项目 Hook | 是否重复触发？ | 去重键兜底 |
-| 3 | 沙箱 vs 本地自动运行写 `~/.fomor` | 权限是否足够？ | 改为项目内 `.fomor/` 或引导用户改模式 |
-| 4 | 用插件安装器写 `hooks.json` | 能否自动注册？是否被平台覆盖？ | 改为手动引导 |
-| 5 | 打包最小插件（Skill + MCP） | 能否安装、启动、被调用？ | 退回本地 HTML 报告交付 |
-| 6 | 插件二进制常驻 | 是否随 Trae 退出？能否开机自启？ | 独立守护进程/计划任务 |
-| 7 | `traecli exec --json --output-schema` | 能否作为分析引擎？成本/延迟如何？ | 改用自有模型 API |
-| 8 | 按 `session_id` 读 CLI 会话 | 能否稳定还原上下文？ | MVP 砍掉按需上下文 |
-| 9 | 三个案例端到端 | 是否产生有启发的探索？ | 回炉 Problem Understanding |
+| 3 | 沙箱 vs 本地自动运行写插件 `data/` | 权限是否足够？ | 改为工作区 `.fomor/` 或引导用户改模式 |
+| 4 | 用安装器写 `hooks.json` | 能否自动注册？是否被平台覆盖？ | 改为手动引导 |
+| 5 | 打包最小插件（Skill + `data/`） | 能否安装、被调用、写文件？ | 改为手动放入 Skills 目录 |
+| 6 | 创建每日自动化任务（本地运行） | 到点是否执行？能否调用 Skill？输出在哪？ | 改为纯 Prompt 任务 |
+| 7 | 自动化任务选云端运行 | 能否读到插件 `data/`？ | 固定本地，接受需唤醒 |
+| 8 | 安装旧版 → 产生数据 → 升级 | `data/` 是否保留？ | 备份 + 迁移到用户目录 |
+| 9 | `traecli exec --json --output-schema` | 能否作为分析引擎？成本/延迟如何？ | 改用自有模型 API |
+| 10 | 按 `session_id` 读 CLI 会话 | 能否稳定还原上下文？ | MVP 砍掉按需上下文 |
+| 11 | 三个案例端到端 | 是否产生有启发的探索？ | 回炉 Problem Understanding |
 
 ---
 
@@ -563,12 +615,14 @@ flowchart LR
 
 1. 插件包可以携带并自动启用 Hook。
 2. 插件安装后可自动写入 `~/.trae-cn/hooks.json`。
-3. 插件 `binaries` 可以常驻运行、随系统开机自启、随 Trae 退出而退出。
-4. IDE 会话历史存在可通过 `session_id` 读取的公开接口。
-5. `UserPromptSubmit.prompt` 包含 `@文件`、图片、长粘贴的完整内容。
-6. 插件可直接调用 Trae 的模型额度（而非用户自带 Key 或 CLI 登录态）。
-7. MCP Server 可以在后台主动推送消息（目前看只能被动调用）。
-8. Hook 在 SOLO / Trae Work 形态下的行为与 IDE 一致。
+3. 自动化任务选云端运行时，能访问插件目录下的 `data/`。
+4. 自动化任务能稳定调用插件内的 Skill 或本地脚本。
+5. 插件升级后，插件目录下的 `data/` 会被保留。
+6. IDE 会话历史存在可通过 `session_id` 读取的公开接口。
+7. `UserPromptSubmit.prompt` 包含 `@文件`、图片、长粘贴的完整内容。
+8. 插件可直接调用 Trae 的模型额度（而非用户自带 Key 或 CLI 登录态）。
+9. Hook 在 SOLO / Trae Work 形态下的行为与 IDE 一致。
+10. 自动化任务在失败/超时后是否有平台级自动重试（目前只看到执行历史）。
 
 ---
 
@@ -578,6 +632,8 @@ flowchart LR
 
 - [通过 Hook 实现自动化（TRAE CN）](https://docs.trae.cn/ide_automate-actions-with-hooks)
 - [Hook 配置详解（TRAE CN）](https://docs.trae.cn/ide_hook-configuration-reference)
+- [定时任务（TraeWork）](https://docs.trae.cn/work_automated-tasks)
+- [自动化任务（TRAE IDE / Agent 窗口）](https://docs.trae.ai/ide/automated-tasks)
 - [技能（Skill）（TRAE CN）](https://docs.trae.cn/ide_skills)
 - [插件市场（TRAE CN）](https://docs.trae.cn/ide_marketplace)
 - [TraeCode CLI 2.0 基础用法](https://docs.trae.cn/cli_basic-usage)
