@@ -1,0 +1,65 @@
+{
+  "date": "2026-11-25",
+  "events": [
+    {
+      "event_id": "evt_20261125192725_47a23d",
+      "platform": "trae",
+      "session_id": "demo-data-service",
+      "timestamp": "2026-11-25T19:27:25+08:00",
+      "user_message": "如何将本地 Docker 数据库迁移到 Supabase？",
+      "collection_status": "collected",
+      "related_topic_id": "topic_20261125192725_998261",
+      "analyzed_at": "2026-11-25T19:27:25+08:00"
+    },
+    {
+      "event_id": "evt_20261125192725_517281",
+      "platform": "trae",
+      "session_id": "demo-data-service",
+      "timestamp": "2026-11-25T19:27:25+08:00",
+      "user_message": "某些复杂的数据采集服务是否应该继续留在本地？",
+      "collection_status": "collected",
+      "related_topic_id": "topic_20261125192725_998261",
+      "analyzed_at": "2026-11-25T19:27:25+08:00"
+    },
+    {
+      "event_id": "evt_20261125192725_4817ce",
+      "platform": "trae",
+      "session_id": "demo-data-service",
+      "timestamp": "2026-11-25T19:27:25+08:00",
+      "user_message": "本地服务如何连接云端数据库？",
+      "collection_status": "collected",
+      "related_topic_id": "topic_20261125192725_998261",
+      "analyzed_at": "2026-11-25T19:27:25+08:00"
+    },
+    {
+      "event_id": "evt_20261125192725_142874",
+      "platform": "trae",
+      "session_id": "demo-data-service",
+      "timestamp": "2026-11-25T19:27:25+08:00",
+      "user_message": "有没有更方便的工具管理这些本地项目？",
+      "collection_status": "collected",
+      "related_topic_id": "topic_20261125192725_998261",
+      "analyzed_at": "2026-11-25T19:27:25+08:00"
+    },
+    {
+      "event_id": "evt_20261125192725_6b035f",
+      "platform": "trae",
+      "session_id": "demo-data-service",
+      "timestamp": "2026-11-25T19:27:25+08:00",
+      "user_message": "如何让其他应用访问数据采集服务？",
+      "collection_status": "collected",
+      "related_topic_id": "topic_20261125192725_998261",
+      "analyzed_at": "2026-11-25T19:27:25+08:00"
+    },
+    {
+      "event_id": "evt_20261125192725_a09f2a",
+      "platform": "trae",
+      "session_id": "demo-data-service",
+      "timestamp": "2026-11-25T19:27:25+08:00",
+      "user_message": "数据采集任务失败后应该如何处理？",
+      "collection_status": "collected",
+      "related_topic_id": "topic_20261125192725_998261",
+      "analyzed_at": "2026-11-25T19:27:25+08:00"
+    }
+  ]
+}
