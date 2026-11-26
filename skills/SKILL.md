@@ -1,33 +1,34 @@
 ---
 name: fomor
-description: Use when setting up Fomor (hooks, data dir, automation task) or when the daily automation executes the analysis SOP. Contains the full methodology: feedback review, evaluate-first, insight into what the user is missing, then dig.
+description: Use when setting up Fomor (hooks, data dir, automation task), when the daily automation executes the exploration SOP, or when the user wants to review results or explicitly refuse content. Contains the full methodology: understand, find gaps, hypothesize, evaluate before searching, research, and deliver an exploration directory.
 user-invocable: true
 disable-model-invocation: false
 ---
 
 # Fomor
 
-Fomor 采集用户在 Trae 中提出的问题，每天由自动化任务中的 **Agent（你）** 按本文档执行分析，报告写入 `~/.fomor/reports/`。所有机械步骤（收集、清理、状态记录）都由 `scripts/fomor` 完成，你只负责思考与写报告。
+Fomor 采集用户在 Trae 中提出的问题，每天由自动化任务中的 **Agent（你）** 按本文档执行一次深度探索，产出「探索目录 + 探索详情」。所有机械步骤（收集、清理、状态提交）都由 `scripts/fomor` 完成，你只负责理解、思考、搜索与写作。
 
 职责划分：
 
 | 组件 | 触发时机 | 做什么 |
 | --- | --- | --- |
-| `UserPromptSubmit` Hook（`scripts/fomor hook`） | 用户发消息 | 静默把问题追加到 `~/.fomor/events/`，不阻塞、不注入 |
+| `UserPromptSubmit` Hook（`scripts/fomor hook`） | 用户发消息 | 静默把问题追加到 `~/.fomor/events/`，不阻塞、不注入、不分析 |
 | `SessionStart` Hook（`scripts/fomor session-start`） | 会话开始 | 静默创建/校验 `~/.fomor/`，不输出 |
-| `scripts/fomor prepare / learn / finish` | 分析前后 | 代码完成：收集窗口与档案、清理过期数据、记录认知、提交本轮 |
-| **自动化任务** | 每天定时 | 你按本文档「每日分析 SOP」执行分析 |
-| 本技能 | 用户调用 / 自动化任务 | 部署检查（A 部分）；分析执行（B 部分） |
+| `scripts/fomor prepare / finish` | 每日探索前后 | 代码完成：读取事件与快照；成功后清理本轮已读事件 |
+| `scripts/fomor dislike` | **仅用户主动调用 Skill 时** | 记录用户明确拒绝的内容 |
+| **自动化任务** | 每天定时 | 你按本文档「每日探索 SOP」执行 |
+| 本技能 | 用户调用 / 自动化任务 | 部署与管理（A）；每日探索 SOP（B）；主动调用（C） |
 
-核心记忆观：
+三条硬性边界，任何时候都不违反：
 
-- **不存话题**。用户真感兴趣的话题每天都会再问出来，不需要额外记录；
-- **长期记忆 = 他已经知道什么**（`profile.json` 的 `known` / `dislikes`），作用只有一个：避免向他推已知道的内容，并据此判断他的认知水位；
-- **短期判断极短**：上一轮的探索结论（`pending`）只活到本次分析，对照完新提问就处置掉。
+1. **事件无处理标记**：不添加 processed/analyzed 字段；事件文件只在分析成功后由 `finish` 按快照清理。
+2. **分析失败不清理**：中断、搜索失败、结果生成失败都不调用 `finish`，原始事件完整保留，下次重新分析。
+3. **Disliked 只进不出、只在主动调用时更新**：每日自动化任务只读不写；用户沉默、没追问、没点击都不是拒绝，不得推断。
 
 ---
 
-## A. 部署（用户说「安装/检查 Fomor」时）
+## A. 部署与管理（用户说「安装/检查 Fomor」时）
 
 ### A1. 环境检查
 
@@ -46,7 +47,7 @@ UserPromptSubmit → <插件根目录>/scripts/fomor hook
 SessionStart     → <插件根目录>/scripts/fomor session-start
 ```
 
-缺失时把仓库 `hooks/hooks.json` 内容合并进去并替换 `${TRAE_PLUGIN_ROOT}`，提醒用户在「设置 > Hooks」启用（安全确认弹窗由用户手动点击）。
+缺失时把仓库 `hooks/hooks.json` 内容合并进去并替换 `${TRAE_PLUGIN_ROOT}`，提醒用户在「设置 > Hooks」启用（安全确认弹窗由用户手动点击）。即使 SessionStart 缺失，首次 hook 也会自动创建数据目录，不会丢消息。
 
 ### A3. 由你创建自动化任务
 
@@ -56,16 +57,16 @@ SessionStart     → <插件根目录>/scripts/fomor session-start
 任务名称：Fomor 每日探索
 触发：每天 <时间>
 任务内容：
-使用 fomor 技能执行今日分析：
-1. 阅读 fomor 技能中的「每日分析 SOP」，逐步执行：prepare → 反馈回看 → 评估 → 洞察 → 挖掘 → 产出与 finish；
-2. 若结论是今天没有值得探索的方向，只回复这一句，不生成报告；
-3. 否则把生成的报告（~/.fomor/reports/latest.md）完整展示给我；
+使用 fomor 技能执行今日探索：
+1. 阅读 fomor 技能中的「每日探索 SOP」，按 Step 0 到 Step 9 完整执行；
+2. 若结论是没有值得探索的方向，明确说明并只执行 Step 9 提交，不生成低质量内容；
+3. 否则把探索目录完整展示给我，并告诉我详情保存在哪里；
 4. 遇到报错或数据不足时如实说明，不要编造。
 ```
 
-创建后告知用户：任务创建后运行环境不可修改；本地任务睡眠期不执行，错过的分析会在下次运行时自动扩大时间窗补上。
+创建后告知用户：任务创建后运行环境不可修改；本地任务睡眠期不执行，错过的探索会在下次运行时补上（未分析的事件会一直保留）。
 
-### A4. 验收
+### A4. 自检
 
 ```bash
 printf '%s' '{"session_id":"setup-check","prompt":"Fomor 安装自检","hook_event_name":"UserPromptSubmit"}' | scripts/fomor hook
@@ -76,78 +77,136 @@ scripts/fomor status
 
 ---
 
-## B. 每日分析 SOP（自动化任务 / 用户说「分析一下」时执行）
+## B. 每日探索 SOP（自动化任务 / 用户主动要求分析时执行）
 
-按顺序执行 0→5，不要跳步。所有判断都要有用户原话作证据，宁可保留不确定，也不编造洞察。
+按 Step 0→9 顺序执行，不要跳步。所有判断都要有用户原话作证据；宁可保留不确定，也不编造洞察。
 
-### 第 0 步：取材料（一行命令，代码已完成清理）
+### Step 0：Prepare（唯一数据入口）
 
 ```bash
 scripts/fomor prepare
 ```
 
-输出 JSON 包含：`events`（上次分析以来的全部提问）、`pending`（上一轮的探索结论）、`known` / `dislikes`（他已知什么、明确不要什么）、`event_files_removed`（本轮清理掉的过期文件）。不要自己去翻目录、删文件、改 state.json——这些代码都做完了。
+输出 JSON：`events`（所有尚未成功分析的用户消息）、`dislikes`（用户明确拒绝的内容）、`snapshot`（本轮读取边界）。**不要自己删文件、不要改 runtime state、不要读历史报告**——事件文件在 `finish` 之前保持原样。
 
-### 第 1 步：反馈回看（处置 pending）
+### Step 1：Problem Understanding（理解用户在做什么）
 
-对照 `pending` 与 `events` 里的新提问：
+分析单位是**一组相关问题**，不是单条消息；不要为了分类而分类。回答：
 
-- **有兴趣**（追问细节、要求尝试、围绕同一目标展开）→ 执行 `scripts/fomor learn --known "<结论/方案名>" --note "<一句话依据+event_id>"`。他的提问证明他现在知道了它，进入长期档案；
-- **明确拒绝**（表示已了解/不感兴趣）→ `scripts/fomor learn --dislike "<名称>" --note "<原话依据>"`；
-- **无相关提问** → 不做任何操作，`finish` 会自动丢弃本轮 pending（短期判断只活一轮）。
+1. 用户正在完成什么任务？
+2. 他真正想实现的目标是什么？
+3. 当前使用什么方法、工具或工作流？
+4. 当前遇到什么问题？
+5. 这些问题之间是否存在因果关系？
+6. 用户有哪些明确提出的约束？
+7. 哪些地方仍然存在不确定性？
 
-### 第 2 步：评估（先评估，再挖掘）
+不确定的地方如实标注，不要强行补全。
 
-把 `events` 按主题归并，对每个候选主题回答三个问题：
+### Step 2：Gap Discovery（识别缺口）
 
-1. 这些提问**最终指向什么目标**？用户正在完成什么任务？
-2. 这个主题是否**反复出现**（跨天追问、同天多次）？
-3. 用户当前的解决方式有没有**明显局限或未言明的缺口**？
+用以下六个**内部分析维度**思考（可以同时成立；它们不是对外的栏目，不出现在最终输出里）：
 
-三问之后决定：值得挖掘 / 暂时观察 / 不值得。**没有值得挖掘的主题就到此为止**：回复「今天没有值得探索的新方向」，然后执行第 5 步的 `finish`（提交空 pending），不生成报告，不硬凑内容。
+1. **Knowledge Gap**：不了解某领域的存在或原理；
+2. **Method Gap**：知道目标但不知道方法；
+3. **Tool Gap**：方法已知但缺少合适工具；
+4. **Workflow Gap**：流程本身有问题（单点都对、串起来不合理）；
+5. **Solution Gap**：当前方案路线本身有局限，需要换路线；
+6. **Perspective Gap**：问题框架本身可以重构（他在优化 A，其实该考虑 B）。
 
-### 第 3 步：洞察（对决定挖掘的主题）
+典型信号：同一事物被反复用不同措辞描述（词汇/参考资源缺口）；连续多天追问同一环节（他在搭系统，缺的是整体方法而非单点答案）。对每个洞察区分：**用户原话/实际行为 → 基于证据的观察 → 推测的缺口 → 置信度**。不要把推测当成事实。
 
-这是分析的核心。对每个主题完成下面的推理链：
+### Step 3：Exploration Hypothesis（形成探索假设）
 
-**3.1 用户到底缺什么？** 逐项判断，并引用原话作证据：
+把洞察转换为具体假设，每个回答：
 
-- 缺**知识**：不了解某个领域的存在或原理；
-- 缺**词汇/风格体系**：反复描述同一事物却用词各异——典型信号：同一天用多种不同说法描述同一个东西（例：用户反复用不同措辞描述「前端动效/过渡效果」却从不使用行业术语）→ 推断他不熟悉该领域的名词与风格体系 → 他正在做这类工作 → 他需要系统地知道这些风格与名称 → 挖掘方向就是提供风格清单、术语对照、可参考的案例；
-- 缺**方法论/工作流**：问题反复出现在流程的同一环节（例：连续几天都在问数据库怎么迁、怎么连、服务放哪）→ 追问：他为什么一直问数据库？他想达成什么目的（稳定？省成本？可维护？）？他有没有提到过约束（数据量、实时性、团队规模）？他是否需要一个整体的工作流或架构方法，而不是单点答案；
-- 缺**判断依据**：知道选项但不会比较取舍。
+- 用户当前的问题是什么？
+- 当前方案可能有什么局限？
+- 如果采用不同方案，可能带来什么改善？
+- 为什么用户可能不知道这种解决路径？
+- 需要搜索和验证什么？
 
-**3.2 区分目标与阻碍**：他想实现什么 ≠ 当前什么在阻碍他。证据不足时列出多个假设并标注置信度，不要强行给一个漂亮结论。
+目标是形成**新的解决方案**，不是找一个关键词对应的工具。
 
-**3.3 对照认知水位**：`known` 里已有的不要当新发现；`known` 能反映他的知识边界——洞察要落在边界之外一步的位置，而不是远超边界。
+### Step 4：Pre-search Evaluation（搜索前评估与过滤）
 
-**3.4 用户自己给过线索吗**：他有没有提过「想用 XX」「听说 YY」「试过 ZZ 但不行」？这些是挖掘的锚点。
+在搜索之前评估每个假设：与用户目标的相关性、潜在改善价值、新颖程度、可行性、行为证据强度。过滤掉：
 
-### 第 4 步：挖掘（使用你的搜索/网页工具）
+- 与用户当前目标关联弱的；
+- 命中 `dislikes` 的；
+- 重复的探索方向；
+- 过于常规、AI 正常对话就会给的答案；
+- 缺乏实际改善价值的。
 
-针对第 3 步识别的缺口去找：方法、工作流、工具、参考资料、案例。要求：
+没有通过评估的假设就明确说明「没有值得探索的方向」——**不为凑数而生成假设**。若全部被过滤，直接跳到 Step 9（提交空确认）。
 
-- **先对照 `known` 与 `dislikes`**：他已知的跳过，他明确不要的不再推；
-- 每个方案说明：解决什么、核心思路、与他当前做法的差异、适用条件/代价；
-- 优先给「不同的解决路径」，而不是同类工具的罗列；
-- 附来源链接；搜不到可靠内容就如实说明，不硬凑；
-- 每个主题 2–3 个方案即可，宁缺毋滥。
+### Step 5：Research & Validation（搜索与验证）
 
-### 第 5 步：产出与提交
+只针对通过评估的假设搜索。重点：新方法、新技术、新工具、工具组合、工作流、开源项目、社区实践、实际案例、跨领域方案。**不要搜索用户普通 AI 对话就能获得的官方文档和基础教程。**
 
-1. **报告** `~/.fomor/reports/YYYY-MM-DD.md` 并同步写 `latest.md`，结构：
-   - 反馈回看摘要（哪些结论被追问了、已进档案）；
-   - 今日主题：洞察结论（目标 / 缺口 / 证据原话）；
-   - 方案与参考（含来源）；
-   - 留给用户的问题（帮助下一轮归因）；
-2. **认知档案**：本轮中用户明确表达「我已经知道/在用 XX」的，执行 `learn --known`；
-3. **提交**：把本轮探索结论整理为 pending 索引（每条含 `id`、`title`、`topic`、`created_at`），用 stdin 提交给代码：
+对每个候选方案验证：是否真实存在？有实际使用案例吗？解决什么问题？与当前方案相比改善在哪？适用条件？成本、风险、迁移限制？符合用户约束吗？搜不到可靠内容就如实说明，不硬凑。
 
-   ```bash
-   printf '%s' '{"pending":[{"id":"db-architecture","title":"...","topic":"...","created_at":"..."}]}' | scripts/fomor finish
-   ```
+### Step 6：Solution Synthesis（方案综合）
 
-   `finish` 会记录 `last_analyzed_at` 并用新 pending 覆盖旧的。空 pending 也要提交（`{"pending":[]}`）。
+把验证过的结果转化为**可理解的解决路径**——工具、技术栈、方法、工作流都是方案的组成部分，不要按类型拆栏目。每个方案说明：核心思路、关键组成、如何解决用户的问题、与当前方案的区别、适用场景、成本和限制。
+
+### Step 7：Exploration Directory（第一层：探索目录）
+
+```markdown
+# Fomor 探索目录 · YYYY-MM-DD
+
+近期观察到你在 [一句话概括用户目标/活动]。
+
+以下方向值得探索：
+
+## <方向标题>
+<一句说明：为什么值得了解>
+
+（数量由质量决定，没有就写「本轮没有值得探索的新方向」）
+```
+
+### Step 8：Exploration Detail（第二层：探索详情）
+
+为每个目录方向生成详情，写入 `~/.fomor/reports/<YYYY-MM-DD>-<slug>.md`。内容随方向调整，不必套同一模板，但必须保留：
+
+- 与用户问题的关联；
+- 发现这个方向的理由（含证据原话与置信度）；
+- 新方案的具体内容；
+- 真实证据和来源；
+- 适用条件及限制。
+
+### Step 9：Finish（成功后提交）
+
+**只有完整分析成功完成后**才执行。把 Step 0 的 `snapshot` 原样传回：
+
+```bash
+printf '%s' '{"snapshot":{...Step 0 的 snapshot 原文...}}' | scripts/fomor finish
+```
+
+`finish` 会只删除本轮已读取的事件（分析期间新增的消息会保留到下一轮）。失败时（`finish` 报错）不要重试删除，如实报告即可——事件会留在磁盘上，下次重新分析。
+
+每日自动化任务在 Step 0→9 中：**不更新 Disliked、不读取 pending、不做反馈回看、不要求用户确认是否感兴趣**。
+
+---
+
+## C. 用户主动调用（唯一允许更新 Disliked 的入口）
+
+用户主动调用 Fomor Skill 时可以：
+
+- **手动执行一次探索**：按 B 部分 Step 0→9 执行；
+- **查看/讨论结果**：读 `~/.fomor/reports/` 下的目录与详情，展开讨论；
+- **更新 Disliked**：仅当用户**明确表达拒绝**时执行：
+
+```bash
+scripts/fomor dislike --name "<内容名称>" [--category content_preference]
+```
+
+Disliked 更新规则：
+
+1. 只记录用户明确说「不想再看到这类内容」的条目；
+2. 用户只是调用了 Skill 但没表达拒绝 → **不更新**；
+3. 用户沉默、没点击、没追问、没用某个方案 → **不推断为拒绝**；
+4. 重复条目自动去重，不需要反馈状态或时间线。
 
 ---
 
@@ -156,12 +215,12 @@ scripts/fomor prepare
 ```text
 ~/.fomor/
 ├── config.json               {"timezone": "Asia/Shanghai", "schedule": "03:00"}
-├── events/YYYY-MM-DD.jsonl   用户问题，按天归档；8 天前的文件由 prepare 自动删除
-├── profile.json              长期记忆：{"known": [...], "dislikes": [...]}——他知道什么、不要什么
-├── reports/latest.md         最近一次报告
-└── runtime/state.json        {"last_analyzed_at", "pending"}；pending 只活到下次分析
+├── events/YYYY-MM-DD.jsonl   用户问题，无处理标记；finish 按快照清理已分析的
+├── profile.json              {"version": 1, "dislikes": [...]} 只记明确拒绝
+├── reports/                  探索目录与详情（留存，可随时删除，不参与每日分析）
+└── runtime/state.json        {"last_successful_analysis_at"}
 ```
 
 Event 只有 5 个字段：`event_id`、`session_id`、`timestamp`、`user_message`、`fingerprint`。
 
-常用命令：`scripts/fomor status`（概览）、`cat ~/.fomor/reports/latest.md`（日常看报告）。
+常用命令：`scripts/fomor status`（概览）、`cat ~/.fomor/reports/*.md`（查看结果）。

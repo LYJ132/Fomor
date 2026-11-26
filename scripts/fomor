@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """Fomor - collect the user's Trae prompts; everything mechanical is code.
 
-The daily analysis itself is executed by the Trae agent following
-skills/SKILL.md. This script owns every mechanical step so the agent only
-thinks and writes Markdown:
+The daily exploration is executed by the Trae agent following skills/SKILL.md.
+This script owns every mechanical step so the agent only thinks and writes:
 
     hook           read a Trae UserPromptSubmit payload from stdin and store it
     session-start  silently create/verify ~/.fomor (SessionStart hook)
-    prepare        one step: gather the analysis window + pending + profile,
-                   drop stale event files and expired pending entries
-    learn          append to the profile (what the user already knows / dislikes)
-    finish         commit the run: set last_analyzed_at and the new pending index
-    status         print counts, schedule and the last analysis time
+    prepare        gather the events to analyze + dislikes + a read snapshot
+    dislike        record one explicitly refused item (skill-invoked only)
+    finish         after a successful analysis: delete the snapshot events
+    status         print counts, schedule and the last successful analysis
+
+Event lifecycle (no processed markers, no per-event state):
+- hook appends to the local day file and never modifies anything else;
+- prepare only READS events and records how many lines it read per file;
+- finish deletes a day file only if it still has exactly the snapshotted line
+  count; if the hook appended new lines during analysis, finish truncates the
+  file to the snapshotted boundary so the new messages survive for next run;
+- if the analysis never completes, finish is never called and events remain.
 
 The hook prints nothing on stdout (its output would be injected into the
 session) and always exits 0 (it must never block the user's turn).
@@ -26,17 +32,17 @@ import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 DEFAULT_CONFIG = {"timezone": "Asia/Shanghai", "schedule": "03:00"}
-DEFAULT_PROFILE = {"known": [], "dislikes": []}
-EVENT_RETENTION_DAYS = 8  # day-files older than this are deleted by prepare
-PENDING_MAX_AGE_DAYS = 3  # pending entries older than this are dropped by prepare
+DEFAULT_PROFILE = {"version": 1, "dislikes": []}
+SNAPSHOT_VERSION = 1
+SNAPSHOT_MAX_AGE_HOURS = 24  # a stale snapshot is refused at finish time
 
 
 # ----------------------------------------------------------------------------
@@ -73,7 +79,7 @@ def read_json(path: Path, default: Any = None) -> Any:
 
 def atomic_write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
 
@@ -112,6 +118,7 @@ class Home:
         return self.root / "runtime" / "state.json"
 
     def ensure(self) -> None:
+        """Lightweight, idempotent init. Called by both hooks and all commands."""
         for directory in (self.root, self.events_dir, self.reports_dir, self.runtime_dir):
             directory.mkdir(parents=True, exist_ok=True)
         try:  # POSIX only
@@ -133,10 +140,17 @@ class Home:
         return read_json(self.state_file, default={}) or {}
 
     def profile(self) -> dict[str, Any]:
-        data = read_json(self.profile_file, default=dict(DEFAULT_PROFILE)) or dict(DEFAULT_PROFILE)
-        merged = dict(DEFAULT_PROFILE)
-        merged.update({k: v for k, v in data.items() if k in DEFAULT_PROFILE and isinstance(v, list)})
-        return merged
+        """Load and self-heal the profile (v0.5 stored {"known", "dislikes"})."""
+        data = read_json(self.profile_file, default=None)
+        if not isinstance(data, dict):
+            data = dict(DEFAULT_PROFILE)
+        migrated = {"version": 1, "dislikes": data.get("dislikes", [])}
+        migrated["dislikes"] = [
+            item for item in migrated["dislikes"] if isinstance(item, dict) and item.get("name")
+        ]
+        if "known" in data or data.get("version") != 1:  # old format: drop known
+            atomic_write_json(self.profile_file, migrated)
+        return migrated
 
 
 # ----------------------------------------------------------------------------
@@ -149,7 +163,7 @@ def event_fingerprint(session_id: str, message: str) -> str:
 
 
 def normalize_hook_payload(payload: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
-    """Keep only fields with a concrete reader; the agent does the rest."""
+    """User message + minimal metadata only; no processing markers."""
     moment = now or datetime.now(timezone.utc)
     message = str(payload.get("prompt") or payload.get("user_message") or "").strip()
     session_id = str(payload.get("session_id") or "")
@@ -174,6 +188,10 @@ def read_day_file(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def count_lines(path: Path) -> int:
+    return len(path.read_text(encoding="utf-8").splitlines())
+
+
 def find_duplicate(home: Home, fingerprint: str) -> bool:
     for path in sorted(home.events_dir.glob("*.jsonl")):
         for record in read_day_file(path):
@@ -182,17 +200,19 @@ def find_duplicate(home: Home, fingerprint: str) -> bool:
     return False
 
 
-def append_event(home: Home, payload: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
-    """Store the prompt. Returns (event, duplicate)."""
-    event = normalize_hook_payload(payload)
+def append_event(home: Home, payload: dict[str, Any], now: datetime | None = None) -> tuple[dict[str, Any] | None, bool]:
+    """Store the prompt. Returns (event, duplicate). Single append, never rewrites."""
+    event = normalize_hook_payload(payload, now)
     if not event["user_message"]:
         return None, False
+    home.ensure()  # first run may arrive via hook before session-start
     if find_duplicate(home, event["fingerprint"]):
         return event, True
     config = home.config()
     day = local_day(parse_iso(event["timestamp"]), config["timezone"])
     path = home.events_dir / f"{day}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
+    # O_APPEND single write keeps concurrent hook processes line-atomic on POSIX.
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, ensure_ascii=False) + "\n")
     return event, False
@@ -203,67 +223,79 @@ def count_events(home: Home) -> int:
 
 
 # ----------------------------------------------------------------------------
-# prepare: the one mechanical step before the agent thinks
+# prepare / finish: the snapshot handover (no processed markers)
 # ----------------------------------------------------------------------------
 
 
 def prepare(home: Home, now: datetime | None = None) -> dict[str, Any]:
-    moment = now or datetime.now(timezone.utc)
-    config = home.config()
-    state = home.state()
+    """Read everything not yet cleaned, and record the read boundary.
 
-    # Parallel: config/state/profile already cached cheaply; read day files and
-    # decide cleanup concurrently.
+    Reads only - never deletes, never marks. The snapshot is per-file line
+    counts; finish uses it to remove exactly what was read.
+    """
+    moment = now or datetime.now(timezone.utc)
+    home.ensure()
     day_files = sorted(home.events_dir.glob("*.jsonl"))
     with ThreadPoolExecutor(max_workers=min(8, max(1, len(day_files)))) as pool:
         loaded = list(pool.map(read_day_file, day_files))
 
-    # Cleanup 1: drop event day-files past retention (by filename date).
-    removed_files = []
-    cutoff_day = (moment - timedelta(days=EVENT_RETENTION_DAYS)).strftime("%Y-%m-%d")
-    for path in day_files:
-        if path.stem[:10] < cutoff_day:
-            path.unlink(missing_ok=True)
-            removed_files.append(path.name)
-
-    # Cleanup 2: drop pending entries past the short judgment window.
-    pending = [
-        item
-        for item in state.get("pending", [])
-        if _age_days(item.get("created_at"), moment) is not None
-        and _age_days(item.get("created_at"), moment) <= PENDING_MAX_AGE_DAYS
-    ]
-    dropped_pending = len(state.get("pending", [])) - len(pending)
-
-    # Window: everything collected since the last analysis (all if never run).
-    last = state.get("last_analyzed_at")
-    events = [
-        record
-        for records in loaded
-        for record in records
-        if not last or record.get("timestamp", "") > last
-    ]
+    events = [record for records in loaded for record in records]
     events.sort(key=lambda item: item.get("timestamp", ""))
-
-    profile = home.profile()
     return {
         "now": to_iso(moment),
-        "last_analyzed_at": last,
         "event_count": len(events),
         "events": events,
-        "pending": pending,
-        "pending_dropped": dropped_pending,
-        "event_files_removed": removed_files,
-        "known": profile["known"],
-        "dislikes": profile["dislikes"],
+        "dislikes": home.profile()["dislikes"],
+        "snapshot": {
+            "version": SNAPSHOT_VERSION,
+            "cutoff": to_iso(moment),
+            "files": {path.name: count_lines(path) for path in day_files},
+        },
     }
 
 
-def _age_days(iso_value: Any, moment: datetime) -> float | None:
-    try:
-        return (moment - parse_iso(str(iso_value))).total_seconds() / 86400
-    except (TypeError, ValueError):
-        return None
+def finish(home: Home, snapshot: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+    """Delete only what the snapshot covered. Returns a cleanup report.
+
+    Raises ValueError on invalid/mismatched snapshots instead of faking success.
+    """
+    moment = now or datetime.now(timezone.utc)
+    if not isinstance(snapshot, dict) or snapshot.get("version") != SNAPSHOT_VERSION:
+        raise ValueError("snapshot invalid: missing or unsupported version")
+    files = snapshot.get("files")
+    if not isinstance(files, dict):
+        raise ValueError("snapshot invalid: 'files' must be an object")
+    cutoff = parse_iso(str(snapshot.get("cutoff", "")))
+    if (moment - cutoff).total_seconds() > SNAPSHOT_MAX_AGE_HOURS * 3600:
+        raise ValueError("snapshot too old: re-run prepare before finishing")
+
+    deleted, truncated = [], []
+    for name, lines in files.items():
+        if not isinstance(lines, int) or lines < 0:
+            raise ValueError(f"snapshot invalid: bad line count for {name}")
+        path = home.events_dir / name
+        if not path.exists():
+            raise ValueError(f"snapshot mismatch: {name} no longer exists")
+        current = count_lines(path)
+        if current < lines:
+            raise ValueError(f"snapshot mismatch: {name} has fewer lines than snapshot")
+        if current == lines:
+            path.unlink()  # fully analyzed: remove the whole day file
+            deleted.append(name)
+        else:
+            # New messages arrived during analysis: the snapshot covers the
+            # file head; keep the tail so they survive for the next run.
+            all_lines = path.read_text(encoding="utf-8").splitlines()
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            tmp.write_text("\n".join(all_lines[lines:]) + "\n", encoding="utf-8")
+            tmp.replace(path)
+            truncated.append(name)
+
+    atomic_write_json(
+        home.state_file,
+        {"last_successful_analysis_at": to_iso(moment)},
+    )
+    return {"deleted": deleted, "truncated": truncated}
 
 
 # ----------------------------------------------------------------------------
@@ -310,51 +342,44 @@ def cmd_hook(args: argparse.Namespace) -> int:
 
 def cmd_prepare(args: argparse.Namespace) -> int:
     home = _home(args)
-    home.ensure()
     print(json.dumps(prepare(home), ensure_ascii=False))
     return 0
 
 
-def cmd_learn(args: argparse.Namespace) -> int:
-    """Append one entry to the profile (what the user knows / dislikes)."""
+def cmd_dislike(args: argparse.Namespace) -> int:
+    """Record one explicitly refused item. Skill-invoked path only.
+
+    The daily automation NEVER calls this (enforced by the Skill SOP, not by
+    an ACL system): refusal must come from the user's own words.
+    """
     home = _home(args)
     home.ensure()
-    if not args.known and not args.dislike:
-        print("fomor learn: require --known NAME or --dislike NAME", file=sys.stderr)
-        return 1
-    if args.known and args.dislike:
-        print("fomor learn: --known and --dislike are exclusive", file=sys.stderr)
+    if not args.name:
+        print("fomor dislike: require --name NAME", file=sys.stderr)
         return 1
     profile = home.profile()
-    entry = {
-        "name": args.known or args.dislike,
-        "note": args.note or "",
-        "at": to_iso(datetime.now(timezone.utc)),
-    }
-    key = "known" if args.known else "dislikes"
-    if not any(normalize_text(item.get("name", "")) == normalize_text(entry["name"]) for item in profile[key]):
-        profile[key].append(entry)
+    entry = {"name": args.name, "category": args.category or "content_preference"}
+    if not any(
+        normalize_text(item.get("name", "")) == normalize_text(entry["name"])
+        for item in profile["dislikes"]
+    ):
+        profile["dislikes"].append(entry)
         atomic_write_json(home.profile_file, profile)
     return 0
 
 
 def cmd_finish(args: argparse.Namespace) -> int:
-    """Commit the run: last_analyzed_at + the new pending index (from stdin)."""
+    """Commit a successful analysis: delete the snapshot-covered events."""
     home = _home(args)
-    home.ensure()
     try:
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
-        pending = payload.get("pending", []) if isinstance(payload, dict) else []
-        if not isinstance(pending, list):
-            raise ValueError("pending must be a list")
-    except ValueError as error:
-        print(f"fomor finish: {error}", file=sys.stderr)
+        snapshot = payload.get("snapshot") if isinstance(payload, dict) else None
+        report = finish(home, snapshot)
+    except (ValueError, OSError) as error:
+        print(f"fomor finish: {error}", file=sys.stderr)  # events stay intact
         return 1
-    atomic_write_json(
-        home.state_file,
-        {"last_analyzed_at": to_iso(datetime.now(timezone.utc)), "pending": pending},
-    )
+    print(json.dumps(report, ensure_ascii=False))
     return 0
 
 
@@ -364,22 +389,22 @@ def cmd_status(args: argparse.Namespace) -> int:
     config = home.config()
     state = home.state()
     profile = home.profile()
+    last = state.get("last_successful_analysis_at") or state.get("last_analyzed_at")
     print(f"home: {home.root}")
     print(f"events: {count_events(home)}")
-    print(f"pending: {len(state.get('pending', []))}")
-    print(f"profile: known={len(profile['known'])} dislikes={len(profile['dislikes'])}")
-    print(f"last_analyzed_at: {state.get('last_analyzed_at', 'never')}")
+    print(f"dislikes: {len(profile['dislikes'])}")
+    print(f"last_successful_analysis_at: {last or 'never'}")
     print(f"schedule: {config['schedule']} ({config['timezone']})")
-    print(f"report: {home.reports_dir / 'latest.md'}")
     return 0
 
 
 def _home(args: argparse.Namespace) -> Home:
+    if getattr(args, "home", None):  # explicit CLI flag wins over the env var
+        return Home(Path(args.home).expanduser())
     override = os.environ.get("FOMOR_HOME")
     if override:
         return Home(Path(override).expanduser())
-    root = Path(args.home).expanduser() if args.home else Path("~/.fomor").expanduser()
-    return Home(root)
+    return Home(Path("~/.fomor").expanduser())
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -398,22 +423,23 @@ def build_parser() -> argparse.ArgumentParser:
     hook.set_defaults(func=cmd_hook)
 
     prepare_cmd = sub.add_parser(
-        "prepare", parents=[common], help="gather the analysis window, pending and profile; run cleanups"
+        "prepare", parents=[common], help="gather events + dislikes + a read snapshot (no deletion)"
     )
     prepare_cmd.set_defaults(func=cmd_prepare)
 
-    learn = sub.add_parser("learn", parents=[common], help="append to the user profile")
-    learn.add_argument("--known", metavar="NAME", help="record something the user already knows")
-    learn.add_argument("--dislike", metavar="NAME", help="record something the user is not interested in")
-    learn.add_argument("--note", default="", help="optional context for the entry")
-    learn.set_defaults(func=cmd_learn)
+    dislike = sub.add_parser(
+        "dislike", parents=[common], help="record one explicitly refused item (skill-invoked only)"
+    )
+    dislike.add_argument("--name", metavar="NAME", help="what the user does not want to see again")
+    dislike.add_argument("--category", default="content_preference", help="optional category tag")
+    dislike.set_defaults(func=cmd_dislike)
 
     finish = sub.add_parser(
-        "finish", parents=[common], help="commit the run (stdin: {\"pending\": [...]})"
+        "finish", parents=[common], help="after a successful analysis (stdin: {\"snapshot\": {...}})"
     )
     finish.set_defaults(func=cmd_finish)
 
-    status = sub.add_parser("status", parents=[common], help="print counts, schedule and last analysis time")
+    status = sub.add_parser("status", parents=[common], help="print counts, schedule, last success")
     status.set_defaults(func=cmd_status)
     return parser
 

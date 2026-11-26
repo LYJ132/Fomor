@@ -7,7 +7,7 @@ import argparse
 from pathlib import Path
 
 import support  # noqa: F401
-from fomor import DEFAULT_CONFIG, DEFAULT_PROFILE, Home, cmd_session_start
+from fomor import DEFAULT_CONFIG, DEFAULT_PROFILE, Home, cmd_session_start, cmd_status
 
 
 def ns(**kwargs):
@@ -45,6 +45,24 @@ class SessionStartTest(unittest.TestCase):
     def test_never_fails_on_unwritable_home(self):
         code = cmd_session_start(ns(home="///definitely/not/writable/xyz", verbose=False))
         self.assertEqual(code, 0)
+
+
+class StatusTest(unittest.TestCase):
+    def test_status_shows_new_fields_only(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        home = Home(Path(self.tmp.name) / "home")
+        home.ensure()
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            cmd_status(ns(home=str(home.root)))
+        text = buffer.getvalue()
+        self.assertIn("events: 0", text)
+        self.assertIn("dislikes: 0", text)
+        self.assertIn("last_successful_analysis_at: never", text)
+        self.assertIn("schedule: 03:00", text)
+        self.assertNotIn("pending", text)
+        self.assertNotIn("known", text)
+        self.tmp.cleanup()
 
 
 if __name__ == "__main__":

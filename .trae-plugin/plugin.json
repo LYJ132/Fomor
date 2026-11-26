@@ -1,7 +1,7 @@
 {
   "name": "fomor",
-  "version": "0.5.0",
-  "description": "A local exploration assistant for Trae: collect the questions you ask, and let the Trae agent analyze them daily to surface what you are missing and alternative solution paths. No model configuration needed.",
+  "version": "0.6.0",
+  "description": "A local exploration assistant for Trae: observe the questions you ask your agent, understand what you are really trying to do, and surface solution paths you have not considered. No model configuration needed.",
   "author": {
     "name": "LYJ132"
   },
@@ -11,17 +11,17 @@
   "keywords": [
     "exploration",
     "solution-discovery",
+    "problem-understanding",
     "trae-hooks",
     "automation",
-    "local-memory",
     "skills"
   ],
   "skills": "./skills",
   "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Fomor",
-    "shortDescription": "Daily agent-driven exploration of alternative solution paths based on your Trae prompts",
-    "longDescription": "Fomor collects the questions you send in Trae through a lightweight hook, and the Trae automation agent analyzes them daily following the bundled SOP: it reviews your implicit feedback, evaluates which topics are worth digging into, builds insight into what you are missing (knowledge, vocabulary, methodology or judgment), then digs for better workflows, methods and references. The only long-term memory is a profile of what you already know and explicitly dislike, so it never repeats itself. Reports live in ~/.fomor. It never injects content into your agent session and needs no model configuration.",
+    "shortDescription": "Daily exploration of new solution paths, built from the questions you already ask your agent",
+    "longDescription": "Fomor collects the questions you send in Trae through a lightweight hook (no prompt injection, no session interference). Once a day, the Trae automation agent follows the bundled SOP: it understands what you are working on and why, identifies potential knowledge, method, tool, workflow, solution and perspective gaps, evaluates which explorations are actually worth pursuing, then researches and validates new methods, tools, workflows and real cases. The result is an exploration directory — a short list of directions worth your attention, each with an optional detail page — delivered through the automation conversation. It never repeats what a normal AI conversation would already give you, never infers refusal from silence (you can explicitly mark content as unwanted by invoking the skill), and never injects content into your sessions.",
     "developerName": "LYJ132",
     "category": "Developer Tools",
     "capabilities": [
@@ -31,8 +31,8 @@
     ],
     "defaultPrompt": [
       "Set up Fomor for this workspace",
-      "Run today's Fomor analysis",
-      "Show me what Fomor explored recently"
+      "Run today's Fomor exploration",
+      "Show me Fomor's exploration directory"
     ],
     "brandColor": "#3B82F6",
     "websiteURL": "https://github.com/LYJ132/Fomor",

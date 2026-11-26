@@ -1,64 +1,87 @@
 # Fomor
 
-一个持续理解用户工作与学习过程、主动发现其他解决方案的 AI 探索助手，首个适配平台为 Trae。
+一个长期在后台运行的探索系统：观察你在 Agent 中提出的问题，理解你正在做什么、真正想实现什么，然后主动寻找你可能还没意识到的解决路径。
+
+## Fomor 是什么
+
+你每天向 AI 提出大量问题。这些问题通常只解决眼前的局部，但它们连起来指向更大的目标；而你的提问方式，也会暴露你的认知和方案缺口。Fomor 把这些信号收集起来，每天由 Agent 做一次深度探索，产出**值得你看一眼的新方向**——不是新闻聚合，不是工具清单，不是普通搜索，而是「面对你现在的问题，还有没有另一种值得尝试的解决方式」。
+
+## 它解决什么问题
+
+- AI 只会沿你当前的技术栈和思路找答案，茧房就是这么形成的；
+- 单次对话只解决局部，没人帮你把一天的问题连起来理解；
+- 常规答案你自己就能问到，Fomor 只交付「你没想到的方向」，没有高价值方向时明确说明。
+
+## 用户旅程
+
+**安装**：安装插件 → Agent 读 Fomor Skill → 检查环境、初始化 `~/.fomor/` → 配置 UserPromptSubmit Hook → 创建每日自动化任务 → 自检。
+
+**日常使用**：你正常使用 Trae。每次发消息 Hook 静默落盘，不注入、不分析、不影响对话。
+
+**每日探索**：Trae 自动化任务启动 Agent，按 SOP 执行：prepare 读取事件 → 理解问题序列 → 识别缺口 → 形成探索假设 → 搜索前评估 → 搜索验证 → 方案综合 → 产出探索目录 + 详情 → finish 清理本轮已读事件。失败则保留原始事件，下次重跑。
+
+**主动调用**：随时让 Agent「看看 Fomor 的探索」「手动分析一次」「这类内容以后别推了」（只有这条路径能写入 Disliked）。
 
 ## 当前架构
 
-**分析由 Agent 执行，机械步骤全部代码化。** 不需要用户配置任何模型参数——Trae 自动化任务里的 Agent 就是分析引擎。
+Agent Hook 负责采集，Python CLI 负责确定性操作，Agent Skill 负责分析与探索，Trae Automation 负责每日调度。
 
 ```text
-UserPromptSubmit Hook ──► events/ 落盘（hook）
-SessionStart Hook    ──► 静默创建/校验 ~/.fomor/（session-start）
-每天 <schedule> 自动化任务 ──► Agent 按 skills/SKILL.md 的 SOP：
-        prepare（一行命令：收集窗口+档案，代码顺带清理过期数据）
-        → 反馈回看（learn 写认知档案）
-        → 评估 → 洞察 → 挖掘
-        → 写报告 + finish（提交 pending，更新 last_analyzed_at）
+UserPromptSubmit Hook ──► events/YYYY-MM-DD.jsonl（追加，无处理标记）
+SessionStart Hook    ──► 静默初始化/校验 ~/.fomor/
+每天 <schedule> 自动化任务 ──► Agent 按 skills/SKILL.md：
+        prepare（读事件+dislikes+快照，不删除）
+        → 理解 → 缺口 → 假设 → 评估 → 搜索 → 综合
+        → 探索目录 + 详情 → finish（只删本轮已读，新增消息保留）
 ```
 
-- **不存话题**：用户真感兴趣的话题每天都会再问出来，不需要额外记录
-- **长期记忆 = 他已知什么**：`profile.json` 只记 known / dislikes，作用是避免重复推荐、判断认知水位
-- **短期判断极短**：上一轮的探索结论只活到本次分析，对照完新提问就处置
-- 交付：自动化任务对话流 + `~/.fomor/reports/latest.md`
+## 数据收集与隐私
 
-## 快速开始
+- 只采集用户主动发送的消息 + 最少元数据（session_id / timestamp / fingerprint），不采集 Agent 回复和完整会话；
+- 数据全部在本地 `~/.fomor/`（权限 0700），不上传任何服务；
+- 不向会话注入内容，Hook 永不阻塞提问；
+- 事件文件没有任何处理标记；只有分析成功后，本轮读取的部分才会被删除，期间新增的消息自动保留。
+
+## 每日分析流程
+
+1. `prepare`：读取所有未清理的事件 + Disliked + 读取边界快照；
+2. **理解**：一组问题在做什么任务、目标是什么、现有方法、约束、不确定性；
+3. **缺口**：知识 / 方法 / 工具 / 工作流 / 方案 / 视野六个内部维度（不出现在输出里）；
+4. **假设**：把缺口转成具体探索假设；
+5. **评估**：搜索前过滤——关联弱、命中 dislikes、重复、过于常规的一律不做；
+6. **搜索验证**：真实存在、有案例、改善明确、条件与代价清楚；
+7. **产出**：探索目录（第一层）+ 每方向详情（第二层）；
+8. `finish`：按快照清理本轮已读事件。
+
+## 探索结果如何呈现
+
+**探索目录**（第一层）：近期观察的一句话理解 + 值得探索的方向列表（标题 + 一句为什么）。**探索详情**（第二层）：为什么发现、与你的关联、新方案内容、真实证据与来源、适用条件与限制。数量由质量决定，没有高价值方向就明说，不凑数。
+
+## 安装与使用
 
 ```bash
 scripts/fomor session-start --verbose   # 创建/校验 ~/.fomor
 printf '%s' '{"session_id":"demo","prompt":"如何把本地数据库迁移到云端？"}' | scripts/fomor hook
 scripts/fomor status
-scripts/fomor prepare                    # 分析材料的唯一入口（含清理）
 ```
 
-分析不需要跑分析命令：让 Agent 读 `skills/SKILL.md` 的「每日分析 SOP」执行即可。
+对 Agent 说「安装/检查 Fomor」即可完成全部部署（含代创建自动化任务）。hooks.json 在 [hooks/hooks.json](hooks/hooks.json)，由 [.trae-plugin/plugin.json](.trae-plugin/plugin.json) 引用。
 
-## 目录结构
+## 项目结构
 
 ```text
 scripts/
-└── fomor               唯一脚本（~14KB）：hook / session-start / prepare / learn / finish / status
+└── fomor               唯一脚本：hook / session-start / prepare / dislike / finish / status
 hooks/
 └── hooks.json          UserPromptSubmit 采集 + SessionStart 环境校验
 skills/
-└── SKILL.md            唯一流程文档：部署 SOP + 分析 SOP（评估→洞察→挖掘）
-docs/                   维护者文档，不参与运行时
+└── SKILL.md            唯一流程文档：部署与管理 / 每日探索 SOP / 主动调用
+docs/                   PRD、待确认问题、平台调研
 tests/                  标准库 unittest
 .trae-plugin/plugin.json
 ```
 
-复杂度控制：
-
-- Agent 从不手写 JSON：收集、清理、状态提交、认知记录全部走代码命令
-- Agent 只写 Markdown 报告；机械步骤（清理过期 events、丢弃过期 pending）在 prepare 里顺带完成
-- 数据只有 4 类：events / profile.json / reports / runtime（state.json）
-
-## 接入 Trae
-
-1. 把 [hooks/hooks.json](hooks/hooks.json) 内容合并到全局 `hooks.json`（`${TRAE_PLUGIN_ROOT}` 替换为仓库绝对路径），在「设置 > Hooks」启用。
-2. 对 Agent 说「安装/检查 Fomor」：它执行 `session-start --verbose`、核对 Hook、**代用户创建**每天 `<schedule>` 的自动化任务（任务内容见 SKILL 的 A3 模板）并验收。
-3. 之后无需人工干预；日常查看 `cat ~/.fomor/reports/latest.md`。
-
-## 开发
+## 开发和测试
 
 ```bash
 python3 -m py_compile scripts/fomor
@@ -67,6 +90,6 @@ tests/run.sh
 
 ## 文档
 
-- [产品需求文档（PRD）](docs/PRD.md) — 产品定位、核心机制、功能设计、MVP 范围
-- [待确认问题清单](docs/OPEN-QUESTIONS.md) — 未决事项、验证实验与决策顺序
-- [Trae 平台能力调研](docs/TRAE-PLATFORM-RESEARCH.md) — Hooks、Skills、插件、MCP、CLI 能力与落地建议
+- [产品需求文档（PRD）](docs/PRD.md) — 当前产品决策与历史设计转折
+- [待确认问题清单](docs/OPEN-QUESTIONS.md) — 未决事项与验证实验
+- [Trae 平台能力调研](docs/TRAE-PLATFORM-RESEARCH.md) — Hooks、Skills、Automation 能力与落地建议
