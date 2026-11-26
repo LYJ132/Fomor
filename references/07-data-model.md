@@ -50,20 +50,18 @@
 
 ## Event
 
-`events/YYYY-MM-DD.jsonl`，一行一个 JSON 对象。
+`events/YYYY-MM-DD.jsonl`，一行一个 JSON 对象。只保留有读取方的字段——每加一个字段都必须回答「谁在什么时机读它」。
 
-| 字段 | 说明 |
-| --- | --- |
-| `event_id` | 事件 ID |
-| `platform` | 采集平台，默认 `trae` |
-| `session_id` | 会话 ID |
-| `timestamp` | UTC ISO 时间 |
-| `user_message` | 用户提问原文 |
-| `collection_status` | 采集状态，正常为 `collected` |
-| `fingerprint` | `platform + session_id + 规范化问题` 的 SHA-256，用于去重 |
-| `related_topic_id` | 分析后关联的 Topic，未分析为 `null` |
-| `analyzed_at` | 已参与分析的 UTC 时间，未分析为 `null` |
-| `metadata` | `cwd`、`workspace_roots`、`hook_event_name` |
+| 字段 | 谁读 | 作用 |
+| --- | --- | --- |
+| `event_id` | 聚合输出、`discovery.source_event_ids`、反馈的 `evidence_event_ids` | 主键；把原始问题与主题、探索结果、反馈证据关联起来 |
+| `session_id` | `fingerprint` 计算；未来按会话补上下文 | 会话定位符；与问题内容一起构成去重键 |
+| `timestamp` | `iter_events` 窗口过滤、按天归档、反馈归因边界 | 所有时间窗口（分析窗口、反馈观察窗）的依据 |
+| `user_message` | 聚合/理解提示词、报告「观察到的问题」 | 唯一的内容载体 |
+| `fingerprint` | `find_event_by_fingerprint`（追加前去重） | `trae + session_id + 规范化问题` 的 SHA-256；Trae 多 Hook 配置会合并执行，去重防污染 |
+| `analyzed_at` | `run_analysis` 过滤未分析事件 | 区分「已参与分析/未分析」，避免同一条问题被重复聚合 |
+
+被裁剪的字段及理由：`platform`（当前只有 Trae，硬编码进指纹）、`collection_status`（恒为 `collected`，无其他状态）、`related_topic_id`（与 `discovery.source_event_ids` 重复）、`metadata`（`cwd`/`workspace_roots`/`hook_event_name` 无读取方，还扩大隐私面）。
 
 ## Topic
 

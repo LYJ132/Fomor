@@ -32,11 +32,13 @@ class StoreTest(unittest.TestCase):
 
     def test_hook_payload_is_normalized(self):
         event = normalize_hook_payload(self._payload("如何迁移数据库？"))
-        self.assertEqual(event["platform"], "trae")
         self.assertEqual(event["user_message"], "如何迁移数据库？")
-        self.assertEqual(event["collection_status"], "collected")
         self.assertIsNone(event["analyzed_at"])
         self.assertTrue(event["fingerprint"])
+        self.assertEqual(
+            sorted(event),
+            ["analyzed_at", "event_id", "fingerprint", "session_id", "timestamp", "user_message"],
+        )
 
     def test_duplicate_prompt_is_skipped(self):
         event = normalize_hook_payload(self._payload("重复的问题"))
@@ -57,9 +59,8 @@ class StoreTest(unittest.TestCase):
         two = normalize_hook_payload(self._payload("问题二"))
         append_event(self.paths, self.config, one)
         append_event(self.paths, self.config, two)
-        mark_events_analyzed(self.paths, [one], "topic_x", utcnow())
+        mark_events_analyzed(self.paths, [one], utcnow())
         by_id = {event["event_id"]: event for event in iter_events(self.paths)}
-        self.assertEqual(by_id[one["event_id"]]["related_topic_id"], "topic_x")
         self.assertIsNotNone(by_id[one["event_id"]]["analyzed_at"])
         self.assertIsNone(by_id[two["event_id"]]["analyzed_at"])
 

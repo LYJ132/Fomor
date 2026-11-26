@@ -402,16 +402,16 @@ Hook 不调用大模型、搜索引擎或执行复杂分析，职责只有一个
 
 #### 6.1.3 采集字段
 
-Event 建议字段：
+Event 字段（每个字段必须有明确的读取方，否则不落盘）：
 
-- `event_id`
-- `platform`
-- `session_id`
-- `timestamp`
-- `user_message`
-- `collection_status`
-- `related_topic_id`（可选）
-- `analyzed_at`（可选）
+- `event_id`：主键，把原始问题与主题、探索结果、反馈证据关联；
+- `session_id`：会话定位符，参与去重键，供未来按会话补上下文；
+- `timestamp`：分析窗口、按天归档、反馈归因边界的时间依据；
+- `user_message`：唯一的内容载体；
+- `fingerprint`：`trae + session_id + 规范化问题` 的 SHA-256，防多 Hook 合并执行导致的重复采集；
+- `analyzed_at`：区分已参与分析/未分析，避免重复聚合。
+
+明确不落盘：`platform`（单平台硬编码）、`collection_status`（无第二状态）、`related_topic_id`（与 Discovery 的 source_event_ids 重复）、`cwd`/`workspace_roots` 等环境元数据（无读取方且扩大隐私面）。
 
 **不采集**：
 

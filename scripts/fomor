@@ -387,30 +387,22 @@ Discovery = dict[str, Any]
 
 
 def event_fingerprint(payload: dict[str, Any]) -> str:
-    platform = str(payload.get("platform") or "trae")
     session = str(payload.get("session_id") or "")
     prompt = normalize_text(str(payload.get("user_message") or ""))
-    return sha256_text(f"{platform}|{session}|{prompt}")
+    return sha256_text(f"trae|{session}|{prompt}")
 
 
 def normalize_hook_payload(payload: dict[str, Any], now: datetime | None = None) -> Event:
+    """Keep only fields with a concrete reader (see references/07-data-model.md)."""
     moment = now or utcnow()
     prompt = str(payload.get("prompt") or payload.get("user_message") or "").strip()
     event: Event = {
         "event_id": payload.get("event_id") or f"evt_{moment.strftime('%Y%m%d%H%M%S')}_{sha256_text(prompt)[:6]}",
-        "platform": payload.get("platform") or "trae",
         "session_id": str(payload.get("session_id") or ""),
         "timestamp": to_iso(moment),
         "user_message": prompt,
-        "collection_status": "collected",
         "fingerprint": "",
-        "related_topic_id": None,
         "analyzed_at": None,
-        "metadata": {
-            "cwd": payload.get("cwd"),
-            "workspace_roots": payload.get("workspace_roots") or [],
-            "hook_event_name": payload.get("hook_event_name") or "UserPromptSubmit",
-        },
     }
     event["fingerprint"] = event_fingerprint(event)
     return event
@@ -454,18 +446,17 @@ def iter_events(
             yield event
 
 
-def mark_events_analyzed(paths: FomorPaths, events: list[Event], topic_id: str, at: datetime) -> None:
+def mark_events_analyzed(paths: FomorPaths, events: list[Event], at: datetime) -> None:
     """Rewrite only the affected daily files, preserving other records."""
-    by_file: dict[Path, list[Event]] = {}
     ids = {event["event_id"] for event in events}
     if not ids:
         return
+    by_file: dict[Path, list[Event]] = {}
     for path in paths.events_dir.glob("*.jsonl"):
         records = list(read_jsonl(path))
         changed = False
         for record in records:
             if record.get("event_id") in ids:
-                record["related_topic_id"] = topic_id
                 record["analyzed_at"] = to_iso(at)
                 changed = True
         if changed:
@@ -1464,7 +1455,7 @@ def run_analysis(
                             topic["introduced_solutions"].append(solution["name"])
                     save_topic(paths, topic)
                     save_discovery(paths, discovery)
-                    mark_events_analyzed(paths, events, topic["topic_id"], moment)
+                    mark_events_analyzed(paths, events, moment)
                     discoveries.append(discovery)
             except Exception as error:  # keep a readable failure record for the skeleton
                 skipped = f"分析失败：{error}"
@@ -1564,7 +1555,6 @@ def cmd_hook(args: argparse.Namespace) -> int:
             return 0
         paths = _paths(args)
         config = ensure_initialized(paths)
-        payload.setdefault("platform", "trae")
         event = normalize_hook_payload(payload)
         if not event["user_message"]:
             return 0

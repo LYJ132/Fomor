@@ -40,10 +40,10 @@ scripts/
 hooks/
 └── hooks.json          UserPromptSubmit 采集 + SessionStart 环境校验/补跑
 references/
-├── 00-system.md        分析引擎全局规则
-├── 01-aggregate.md … 06-feedback.md
-└── 07-data-model.md    ~/.fomor/ 目录与字段
-skills/SKILL.md   完整操作 SOP（安装、分析、查看、排障）
+├── 00-system.md        分析引擎全局规则（由 scripts/fomor 自动加载）
+├── 01-aggregate.md … 06-feedback.md   各阶段提示词契约（同上）
+└── 07-data-model.md    ~/.fomor/ 目录与字段说明
+skills/SKILL.md   用户调用时的部署检查 + 自动化任务模板
 docs/                   维护者文档，不参与运行时
 tests/                  标准库 unittest
 .trae-plugin/plugin.json
@@ -60,10 +60,12 @@ tests/                  标准库 unittest
 
 ## 接入 Trae
 
+分工：`SessionStart` 只做静默环境校验与补跑；**自动化任务由用户手动创建**，模板在 [skills/SKILL.md](skills/SKILL.md)。
+
 1. 插件清单 [.trae-plugin/plugin.json](.trae-plugin/plugin.json) 通过 `hooks` 字段引用 [hooks/hooks.json](hooks/hooks.json)。
 2. 若 Trae 未自动加载插件 Hook：把 `hooks/hooks.json` 复制到全局 `hooks.json`，将 `${TRAE_PLUGIN_ROOT}` 替换为仓库绝对路径，然后在「设置 > Hooks」启用并信任。项目级 Hook 还需信任工作区。
-3. 在 Trae「自动化」中创建本地任务，触发时间用 `scripts/fomor status` 显示的 `schedule`（默认 03:00，可在 `~/.fomor/config/settings.json` 修改），任务内容使用 `fomor` 技能。
-4. 完整步骤见 [skills/SKILL.md](skills/SKILL.md)。
+3. 在 Trae「自动化」中按 SKILL 里的模板创建本地任务，触发时间用 `scripts/fomor status` 显示的 `schedule`（默认 03:00，可在 `~/.fomor/config/settings.json` 修改）。
+4. 让 AI 检查部署：对它说「安装/检查 Fomor」，它会执行 `session-start --verbose`、核对 Hook、给出自动化任务模板并验收。
 
 Hook 只写本地文件、stdout 为空、退出码始终为 0，不会阻断用户提问，也不向 Agent 注入内容。
 

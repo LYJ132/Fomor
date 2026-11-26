@@ -243,7 +243,7 @@ Session 创建
 | 命令 | `fomor-hook collect`（独立小二进制，启动快） |
 | 耗时 | < 100ms 为目标，硬超时 5s |
 | 写入 | 追加到本地 JSONL + 原子 rename；失败写 fallback 日志 |
-| 去重键 | `platform + session_id + sha256(prompt) + 时间窗` |
+| 去重键 | `trae + session_id + sha256(规范化问题)` |
 | 输出 | 空 stdout，退出码 0 |
 | 失败 | 永不阻断；不返回退出码 2 |
 | 多 Hook | 安装器检测已存在的 Fomor Hook，避免重复注册 |
