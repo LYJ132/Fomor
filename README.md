@@ -4,17 +4,21 @@
 
 ## 当前架构
 
-**分析由 Agent 执行，脚本只做采集。** 不需要用户配置任何模型参数——Trae 自动化任务里的 Agent 就是分析引擎。
+**分析由 Agent 执行，机械步骤全部代码化。** 不需要用户配置任何模型参数——Trae 自动化任务里的 Agent 就是分析引擎。
 
 ```text
-UserPromptSubmit Hook ──► events/ 落盘（唯一脚本职责）
-SessionStart Hook    ──► 静默创建/校验 ~/.fomor/
-每天 <schedule> 自动化任务 ──► Agent 按 skills/SKILL.md 的 SOP 执行：
-        反馈回看 → 评估 → 洞察 → 挖掘 → 报告 + 长期记忆
+UserPromptSubmit Hook ──► events/ 落盘（hook）
+SessionStart Hook    ──► 静默创建/校验 ~/.fomor/（session-start）
+每天 <schedule> 自动化任务 ──► Agent 按 skills/SKILL.md 的 SOP：
+        prepare（一行命令：收集窗口+档案，代码顺带清理过期数据）
+        → 反馈回看（learn 写认知档案）
+        → 评估 → 洞察 → 挖掘
+        → 写报告 + finish（提交 pending，更新 last_analyzed_at）
 ```
 
-- 长期记忆：`~/.fomor/` 下的文件（topics / discoveries / reports）
-- 反馈：每次分析先回看——被追问的探索提升进 topics，无人问津的到期删除
+- **不存话题**：用户真感兴趣的话题每天都会再问出来，不需要额外记录
+- **长期记忆 = 他已知什么**：`profile.json` 只记 known / dislikes，作用是避免重复推荐、判断认知水位
+- **短期判断极短**：上一轮的探索结论只活到本次分析，对照完新提问就处置
 - 交付：自动化任务对话流 + `~/.fomor/reports/latest.md`
 
 ## 快速开始
@@ -23,15 +27,16 @@ SessionStart Hook    ──► 静默创建/校验 ~/.fomor/
 scripts/fomor session-start --verbose   # 创建/校验 ~/.fomor
 printf '%s' '{"session_id":"demo","prompt":"如何把本地数据库迁移到云端？"}' | scripts/fomor hook
 scripts/fomor status
+scripts/fomor prepare                    # 分析材料的唯一入口（含清理）
 ```
 
-分析不需要跑命令：让 Agent 读 `skills/SKILL.md` 的「每日分析 SOP」执行即可（或由自动化任务每天自动执行）。
+分析不需要跑分析命令：让 Agent 读 `skills/SKILL.md` 的「每日分析 SOP」执行即可。
 
 ## 目录结构
 
 ```text
 scripts/
-└── fomor               唯一脚本（~10KB）：hook 采集 / session-start / status
+└── fomor               唯一脚本（~14KB）：hook / session-start / prepare / learn / finish / status
 hooks/
 └── hooks.json          UserPromptSubmit 采集 + SessionStart 环境校验
 skills/
@@ -43,9 +48,9 @@ tests/                  标准库 unittest
 
 复杂度控制：
 
-- 脚本只做三件事：采集、环境校验、状态概览；没有分析管线、模型后端、调度器、备份
-- 模型文件为零：分析方法是 SOP 里的推理链（Agent 读取并执行）
-- 数据只有 5 类：events / topics / discoveries / reports / runtime（含一个 state.json）
+- Agent 从不手写 JSON：收集、清理、状态提交、认知记录全部走代码命令
+- Agent 只写 Markdown 报告；机械步骤（清理过期 events、丢弃过期 pending）在 prepare 里顺带完成
+- 数据只有 4 类：events / profile.json / reports / runtime（state.json）
 
 ## 接入 Trae
 

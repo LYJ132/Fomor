@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Fomor - collect the user's Trae prompts and verify the local environment.
+"""Fomor - collect the user's Trae prompts; everything mechanical is code.
 
-Daily analysis is executed by the Trae agent following skills/SKILL.md; this
-script is deliberately tiny: it never runs an LLM and has exactly three
-commands:
+The daily analysis itself is executed by the Trae agent following
+skills/SKILL.md. This script owns every mechanical step so the agent only
+thinks and writes Markdown:
 
     hook           read a Trae UserPromptSubmit payload from stdin and store it
     session-start  silently create/verify ~/.fomor (SessionStart hook)
+    prepare        one step: gather the analysis window + pending + profile,
+                   drop stale event files and expired pending entries
+    learn          append to the profile (what the user already knows / dislikes)
+    finish         commit the run: set last_analyzed_at and the new pending index
     status         print counts, schedule and the last analysis time
 
 The hook prints nothing on stdout (its output would be injected into the
@@ -21,16 +25,18 @@ import json
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 DEFAULT_CONFIG = {"timezone": "Asia/Shanghai", "schedule": "03:00"}
-DEDUPE_DAYS = 2  # same message within this window is dropped (hooks may merge)
-RETENTION_DAYS = 8  # event day-files older than this are deleted by the agent
+DEFAULT_PROFILE = {"known": [], "dislikes": []}
+EVENT_RETENTION_DAYS = 8  # day-files older than this are deleted by prepare
+PENDING_MAX_AGE_DAYS = 3  # pending entries older than this are dropped by prepare
 
 
 # ----------------------------------------------------------------------------
@@ -86,14 +92,6 @@ class Home:
         return self.root / "events"
 
     @property
-    def topics_dir(self) -> Path:
-        return self.root / "topics"
-
-    @property
-    def discoveries_dir(self) -> Path:
-        return self.root / "discoveries"
-
-    @property
     def reports_dir(self) -> Path:
         return self.root / "reports"
 
@@ -106,18 +104,15 @@ class Home:
         return self.root / "config.json"
 
     @property
+    def profile_file(self) -> Path:
+        return self.root / "profile.json"
+
+    @property
     def state_file(self) -> Path:
         return self.root / "runtime" / "state.json"
 
     def ensure(self) -> None:
-        for directory in (
-            self.root,
-            self.events_dir,
-            self.topics_dir,
-            self.discoveries_dir,
-            self.reports_dir,
-            self.runtime_dir,
-        ):
+        for directory in (self.root, self.events_dir, self.reports_dir, self.runtime_dir):
             directory.mkdir(parents=True, exist_ok=True)
         try:  # POSIX only
             self.root.chmod(0o700)
@@ -125,15 +120,28 @@ class Home:
             pass
         if not self.config_file.exists():
             atomic_write_json(self.config_file, DEFAULT_CONFIG)
+        if not self.profile_file.exists():
+            atomic_write_json(self.profile_file, DEFAULT_PROFILE)
 
     def config(self) -> dict[str, Any]:
-        data = read_json(self.config_file, default=dict(DEFAULT_CONFIG)) or dict(DEFAULT_CONFIG)
+        data = read_json(self.config_file, default={}) or {}
         merged = dict(DEFAULT_CONFIG)
         merged.update({k: v for k, v in data.items() if k in DEFAULT_CONFIG})
         return merged
 
     def state(self) -> dict[str, Any]:
         return read_json(self.state_file, default={}) or {}
+
+    def profile(self) -> dict[str, Any]:
+        data = read_json(self.profile_file, default=dict(DEFAULT_PROFILE)) or dict(DEFAULT_PROFILE)
+        merged = dict(DEFAULT_PROFILE)
+        merged.update({k: v for k, v in data.items() if k in DEFAULT_PROFILE and isinstance(v, list)})
+        return merged
+
+
+# ----------------------------------------------------------------------------
+# collection (hook)
+# ----------------------------------------------------------------------------
 
 
 def event_fingerprint(session_id: str, message: str) -> str:
@@ -154,13 +162,21 @@ def normalize_hook_payload(payload: dict[str, Any], now: datetime | None = None)
     }
 
 
+def read_day_file(path: Path) -> list[dict[str, Any]]:
+    records = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            records.append(json.loads(line))
+        except ValueError:
+            continue
+    return records
+
+
 def find_duplicate(home: Home, fingerprint: str) -> bool:
     for path in sorted(home.events_dir.glob("*.jsonl")):
-        for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
+        for record in read_day_file(path):
             if record.get("fingerprint") == fingerprint:
                 return True
     return False
@@ -183,21 +199,71 @@ def append_event(home: Home, payload: dict[str, Any]) -> tuple[dict[str, Any] | 
 
 
 def count_events(home: Home) -> int:
-    total = 0
-    for path in home.events_dir.glob("*.jsonl"):
-        total += sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
-    return total
+    return sum(len(read_day_file(path)) for path in home.events_dir.glob("*.jsonl"))
 
 
-def count_discoveries(home: Home) -> tuple[int, int]:
-    observing = promoted = 0
-    for path in home.discoveries_dir.glob("*.json"):
-        data = read_json(path, default={}) or {}
-        if data.get("status") == "promoted":
-            promoted += 1
-        else:
-            observing += 1
-    return observing, promoted
+# ----------------------------------------------------------------------------
+# prepare: the one mechanical step before the agent thinks
+# ----------------------------------------------------------------------------
+
+
+def prepare(home: Home, now: datetime | None = None) -> dict[str, Any]:
+    moment = now or datetime.now(timezone.utc)
+    config = home.config()
+    state = home.state()
+
+    # Parallel: config/state/profile already cached cheaply; read day files and
+    # decide cleanup concurrently.
+    day_files = sorted(home.events_dir.glob("*.jsonl"))
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(day_files)))) as pool:
+        loaded = list(pool.map(read_day_file, day_files))
+
+    # Cleanup 1: drop event day-files past retention (by filename date).
+    removed_files = []
+    cutoff_day = (moment - timedelta(days=EVENT_RETENTION_DAYS)).strftime("%Y-%m-%d")
+    for path in day_files:
+        if path.stem[:10] < cutoff_day:
+            path.unlink(missing_ok=True)
+            removed_files.append(path.name)
+
+    # Cleanup 2: drop pending entries past the short judgment window.
+    pending = [
+        item
+        for item in state.get("pending", [])
+        if _age_days(item.get("created_at"), moment) is not None
+        and _age_days(item.get("created_at"), moment) <= PENDING_MAX_AGE_DAYS
+    ]
+    dropped_pending = len(state.get("pending", [])) - len(pending)
+
+    # Window: everything collected since the last analysis (all if never run).
+    last = state.get("last_analyzed_at")
+    events = [
+        record
+        for records in loaded
+        for record in records
+        if not last or record.get("timestamp", "") > last
+    ]
+    events.sort(key=lambda item: item.get("timestamp", ""))
+
+    profile = home.profile()
+    return {
+        "now": to_iso(moment),
+        "last_analyzed_at": last,
+        "event_count": len(events),
+        "events": events,
+        "pending": pending,
+        "pending_dropped": dropped_pending,
+        "event_files_removed": removed_files,
+        "known": profile["known"],
+        "dislikes": profile["dislikes"],
+    }
+
+
+def _age_days(iso_value: Any, moment: datetime) -> float | None:
+    try:
+        return (moment - parse_iso(str(iso_value))).total_seconds() / 86400
+    except (TypeError, ValueError):
+        return None
 
 
 # ----------------------------------------------------------------------------
@@ -209,7 +275,7 @@ def cmd_session_start(args: argparse.Namespace) -> int:
     """SessionStart hook: silently verify/repair the environment."""
     try:
         home = _home(args)
-        before = home.config_file.exists() and home.events_dir.is_dir()
+        existed = home.config_file.exists() and home.events_dir.is_dir()
         home.ensure()
         if args.verbose:
             print(
@@ -217,7 +283,7 @@ def cmd_session_start(args: argparse.Namespace) -> int:
                     {
                         "ok": True,
                         "home": str(home.root),
-                        "existed": bool(before),
+                        "existed": bool(existed),
                         "schedule": home.config()["schedule"],
                         "timezone": home.config()["timezone"],
                     },
@@ -235,11 +301,60 @@ def cmd_hook(args: argparse.Namespace) -> int:
     try:
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else None
-        if not isinstance(payload, dict):
-            return 0
-        append_event(_home(args), payload)
+        if isinstance(payload, dict):
+            append_event(_home(args), payload)
     except Exception as error:  # collect is best-effort
         print(f"fomor hook error: {error}", file=sys.stderr)
+    return 0
+
+
+def cmd_prepare(args: argparse.Namespace) -> int:
+    home = _home(args)
+    home.ensure()
+    print(json.dumps(prepare(home), ensure_ascii=False))
+    return 0
+
+
+def cmd_learn(args: argparse.Namespace) -> int:
+    """Append one entry to the profile (what the user knows / dislikes)."""
+    home = _home(args)
+    home.ensure()
+    if not args.known and not args.dislike:
+        print("fomor learn: require --known NAME or --dislike NAME", file=sys.stderr)
+        return 1
+    if args.known and args.dislike:
+        print("fomor learn: --known and --dislike are exclusive", file=sys.stderr)
+        return 1
+    profile = home.profile()
+    entry = {
+        "name": args.known or args.dislike,
+        "note": args.note or "",
+        "at": to_iso(datetime.now(timezone.utc)),
+    }
+    key = "known" if args.known else "dislikes"
+    if not any(normalize_text(item.get("name", "")) == normalize_text(entry["name"]) for item in profile[key]):
+        profile[key].append(entry)
+        atomic_write_json(home.profile_file, profile)
+    return 0
+
+
+def cmd_finish(args: argparse.Namespace) -> int:
+    """Commit the run: last_analyzed_at + the new pending index (from stdin)."""
+    home = _home(args)
+    home.ensure()
+    try:
+        raw = sys.stdin.read()
+        payload = json.loads(raw) if raw.strip() else {}
+        pending = payload.get("pending", []) if isinstance(payload, dict) else []
+        if not isinstance(pending, list):
+            raise ValueError("pending must be a list")
+    except ValueError as error:
+        print(f"fomor finish: {error}", file=sys.stderr)
+        return 1
+    atomic_write_json(
+        home.state_file,
+        {"last_analyzed_at": to_iso(datetime.now(timezone.utc)), "pending": pending},
+    )
     return 0
 
 
@@ -248,11 +363,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     home.ensure()
     config = home.config()
     state = home.state()
-    observing, promoted = count_discoveries(home)
+    profile = home.profile()
     print(f"home: {home.root}")
     print(f"events: {count_events(home)}")
-    print(f"topics: {len(list(home.topics_dir.glob('*.json')))}")
-    print(f"discoveries: observing={observing} promoted={promoted}")
+    print(f"pending: {len(state.get('pending', []))}")
+    print(f"profile: known={len(profile['known'])} dislikes={len(profile['dislikes'])}")
     print(f"last_analyzed_at: {state.get('last_analyzed_at', 'never')}")
     print(f"schedule: {config['schedule']} ({config['timezone']})")
     print(f"report: {home.reports_dir / 'latest.md'}")
@@ -281,6 +396,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     hook = sub.add_parser("hook", parents=[common], help="read a Trae UserPromptSubmit payload from stdin")
     hook.set_defaults(func=cmd_hook)
+
+    prepare_cmd = sub.add_parser(
+        "prepare", parents=[common], help="gather the analysis window, pending and profile; run cleanups"
+    )
+    prepare_cmd.set_defaults(func=cmd_prepare)
+
+    learn = sub.add_parser("learn", parents=[common], help="append to the user profile")
+    learn.add_argument("--known", metavar="NAME", help="record something the user already knows")
+    learn.add_argument("--dislike", metavar="NAME", help="record something the user is not interested in")
+    learn.add_argument("--note", default="", help="optional context for the entry")
+    learn.set_defaults(func=cmd_learn)
+
+    finish = sub.add_parser(
+        "finish", parents=[common], help="commit the run (stdin: {\"pending\": [...]})"
+    )
+    finish.set_defaults(func=cmd_finish)
 
     status = sub.add_parser("status", parents=[common], help="print counts, schedule and last analysis time")
     status.set_defaults(func=cmd_status)

@@ -1,6 +1,6 @@
 {
   "name": "fomor",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "A local exploration assistant for Trae: collect the questions you ask, and let the Trae agent analyze them daily to surface what you are missing and alternative solution paths. No model configuration needed.",
   "author": {
     "name": "LYJ132"
@@ -21,7 +21,7 @@
   "interface": {
     "displayName": "Fomor",
     "shortDescription": "Daily agent-driven exploration of alternative solution paths based on your Trae prompts",
-    "longDescription": "Fomor collects the questions you send in Trae through a lightweight hook, and the Trae automation agent analyzes them daily following the bundled SOP: it reviews your implicit feedback, evaluates which topics are worth digging into, builds insight into what you are missing (knowledge, vocabulary, methodology or judgment), then digs for better workflows, methods and references. Reports live in ~/.fomor. It never injects content into your agent session and needs no model configuration.",
+    "longDescription": "Fomor collects the questions you send in Trae through a lightweight hook, and the Trae automation agent analyzes them daily following the bundled SOP: it reviews your implicit feedback, evaluates which topics are worth digging into, builds insight into what you are missing (knowledge, vocabulary, methodology or judgment), then digs for better workflows, methods and references. The only long-term memory is a profile of what you already know and explicitly dislike, so it never repeats itself. Reports live in ~/.fomor. It never injects content into your agent session and needs no model configuration.",
     "developerName": "LYJ132",
     "category": "Developer Tools",
     "capabilities": [
