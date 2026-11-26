@@ -30,26 +30,62 @@ Fomor 采集用户在 Trae 中提出的问题，每天由自动化任务中的 *
 
 ## A. 部署与管理（用户说「安装/检查 Fomor」时）
 
+**命令路径约定**：下文 `scripts/fomor` 指 Fomor 仓库（或插件）根目录下的脚本。不在仓库根目录时用绝对路径（如 `~/fomor/scripts/fomor`）；Windows 把 `python3` 换成 `python`。
+
+动手前先问用户两件事：
+
+1. **安装范围**：全局（所有工作区可用，推荐）还是只装当前项目？
+2. **是否已有 Hook 配置**：已有 `hooks.json` 时必须合并，不能覆盖。
+
+同时说明：部署中有几件事**只能由人完成**——启用 Hook（含安全确认）、信任工作区、必要时手动粘贴配置。除这些之外由你执行，不要声称用户已完成。
+
 ### A1. 环境检查
 
 ```bash
 scripts/fomor session-start --verbose
 ```
 
-`ok: true` 即就绪；`missing` 含 `python` 则先请用户安装 Python 3.10+ 并终止。
+- 输出含 `"ok": true` 即数据目录就绪（`~/.fomor` 会自动创建，不要手动改里面的文件）；
+- 命令报错或提示缺少 python：请用户安装 Python 3.10+ 后重试，不要继续后续步骤。
 
-### A2. Hook 核对
+### A2. 安装 / 更新 Skill
 
-读取全局 `~/.trae-cn/hooks.json`（国际版 `~/.trae/hooks.json`）或项目 `.trae/hooks.json`，确认两条命令（`<插件根目录>` 用实际绝对路径替换）：
+如果你能读到本文档，说明 Skill 已加载；若是首次安装，把仓库的 `skills/SKILL.md` 放到下面任一位置：
+
+| 范围 | 路径 |
+| --- | --- |
+| 全局（国内版） | `~/.trae-cn/skills/fomor/SKILL.md` |
+| 全局（国际版） | `~/.trae/skills/fomor/SKILL.md` |
+| 项目级 | `<项目>/.trae/skills/fomor/SKILL.md` |
+
+Windows 把 `~` 换成 `%USERPROFILE%`。
+
+### A3. 配置采集 Hook
+
+把仓库 `hooks/hooks.json` 里的 `${TRAE_PLUGIN_ROOT}` 替换为仓库绝对路径，合并到对应文件：
+
+| 范围 | 文件 |
+| --- | --- |
+| 全局（国内版） | `~/.trae-cn/hooks.json` |
+| 全局（国际版） | `~/.trae/hooks.json` |
+| 项目级 | `<项目>/.trae/hooks.json` |
+
+需要的两条命令：
 
 ```text
-UserPromptSubmit → <插件根目录>/scripts/fomor hook
-SessionStart     → <插件根目录>/scripts/fomor session-start
+UserPromptSubmit → <仓库绝对路径>/scripts/fomor hook
+SessionStart     → <仓库绝对路径>/scripts/fomor session-start
 ```
 
-缺失时把仓库 `hooks/hooks.json` 内容合并进去并替换 `${TRAE_PLUGIN_ROOT}`，提醒用户在「设置 > Hooks」启用（安全确认弹窗由用户手动点击）。即使 SessionStart 缺失，首次 hook 也会自动创建数据目录，不会丢消息。
+- **合并而不是覆盖**：保留用户已有的其他 Hook；
+- **写不进去就交给用户**：如果无法直接修改该文件，把完整 JSON 输出给用户手动粘贴，并明确说明「这一步尚未完成」；
+- **必须由用户完成的三件事**（逐条提醒）：
+  1. 在 Trae「设置 > Hooks」启用这两条 Hook；
+  2. 信任当前工作区（项目级 Hook 需要）；
+  3. 允许「本地自动运行」——Hook 要写 `~/.fomor/`，安全提示由用户点击确认；
+- 即使 SessionStart 未启用，首次 `hook` 也会自动创建数据目录，不会丢消息。
 
-### A3. 由你创建自动化任务
+### A4. 由你创建自动化任务
 
 不要让用户手动新建。使用 Trae 的对话创建能力，按以下模板创建（`<时间>` 取 `scripts/fomor status` 输出的 `schedule` 值）：
 
@@ -64,16 +100,28 @@ SessionStart     → <插件根目录>/scripts/fomor session-start
 4. 遇到报错或数据不足时如实说明，不要编造。
 ```
 
-创建后告知用户：任务创建后运行环境不可修改；本地任务睡眠期不执行，错过的探索会在下次运行时补上（未分析的事件会一直保留）。
+创建后告知用户：任务创建后运行环境不可修改；本地任务睡眠期不执行，错过的探索会在下次运行时补上（未分析的事件会一直保留）。若对话创建无法指定「本地」运行环境，明确告知：云端任务读不到 `~/.fomor/`，需删除后在「自动化」界面手动重建为本地。
 
-### A4. 自检
+### A5. 自检
 
 ```bash
 printf '%s' '{"session_id":"setup-check","prompt":"Fomor 安装自检","hook_event_name":"UserPromptSubmit"}' | scripts/fomor hook
 scripts/fomor status
 ```
 
-`events` 增加 1、重复执行不再增加即采集正常。从 `~/.fomor/events/<当天>.jsonl` 删除 `session_id` 为 `setup-check` 的自检记录。最后确认：自动化任务已创建、Hook 已启用。
+`events` 增加 1、重复执行不再增加即采集正常。从 `~/.fomor/events/<当天>.jsonl` 删除 `session_id` 为 `setup-check` 的那一行（只删这一行）。
+
+### A6. 收尾报告
+
+向用户逐项说明：
+
+- 仓库路径、Python 版本；
+- Skill 安装位置；
+- Hook 配置文件位置，以及是否已由用户在设置中启用；
+- 自动化任务名与触发时间；
+- **仍需用户手动完成的项**（没有就写「无」）。
+
+任何一步失败都要如实说明并给出排查方向，不要为了交付而假装成功。
 
 ---
 
