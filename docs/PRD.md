@@ -68,7 +68,7 @@
 
 | 决策项 | 结论 | 影响 |
 | --- | --- | --- |
-| 定时分析 | **直接使用 Trae 自带的自动化任务**，每天凌晨触发（默认 **03:00**，可在配置中修改）；不自建调度器、常驻守护进程或 MCP 交付服务 | 分析由 Trae 定时执行，结果生成在自动化任务的对话流中 |
+| 定时分析 | **直接使用 Trae 自带的自动化任务**，每天凌晨触发（默认 **03:00**，可配置）；**分析由任务中的 Agent 按插件 SOP 执行**（评估 → 洞察 → 挖掘），不依赖分析脚本或模型配置；脚本只负责 Hook 采集、环境校验与状态概览 | Agent 的智能就是分析引擎；用户零模型配置 |
 | 长期记忆 | **存放在用户主目录 `~/.fomor/`**，不使用插件目录，不写入 Trae 目录，不引入数据库 | 避免插件升级或平台清理影响；Topic、Discovery、事件与运行状态全部是本地文件 |
 | 结果返回 | **当前版本只依托 Trae 自动化任务的输出**，不做独立 APP、IM 推送或 Trae 内 MCP 浏览面板 | 交付闭环 = 自动化任务执行记录 + 对话流 |
 | 反馈 | **次日分析优先回看前一天的提问**：有新兴趣 → 移入长期记忆；无兴趣 → 到期自动删除 | 不新增反馈入口，用 Trae 中的自然追问作为隐式反馈 |
@@ -763,8 +763,8 @@ Trae 自动化任务（每天固定时间 / 间隔）
 | --- | --- | --- |
 | 采集 | Trae Hook | 只做快速落盘，不调用模型、不搜索、不阻塞 |
 | 调度 | Trae 自动化任务 | 固定时间（每天/每周/每月）、间隔触发或自然语言自定义 |
-| 反馈回看 | 自动化任务中的 Fomor Skill/脚本 | 先评估上一批 Discovery，再分析新事件 |
-| 分析 | 自动化任务中的 Agent + Fomor Skill/脚本 | 读取事件与记忆，完成聚合、理解、评分、探索与生成 |
+| 反馈回看 | 任务中的 Agent 按 SOP 第 1 步执行 | 先评估上一批 Discovery，再分析新事件 |
+| 分析 | 任务中的 Agent 按 `skills/SKILL.md` 的 SOP 执行：评估 → 洞察（缺知识/词汇/方法论/判断依据，含反复描述与连续追问信号）→ 挖掘 | 读取事件与记忆，不依赖分析脚本 |
 | 记忆 | `~/.fomor/` 下的文件 | Topic、Discovery、事件、运行状态 |
 | 返回 | 自动化任务输出 | 结果生成在任务对话流与执行历史中 |
 
@@ -985,51 +985,41 @@ fomor/
 ├── .trae-plugin/
 │   └── plugin.json
 ├── hooks/
-│   └── hooks.json             # UserPromptSubmit 采集 + SessionStart 补跑
+│   └── hooks.json             # UserPromptSubmit 采集 + SessionStart 环境校验
 ├── scripts/
-│   └── fomor                  # 唯一可执行入口（单文件，含提示词契约）
+│   └── fomor                  # 唯一脚本：hook 采集 / session-start / status
 └── skills/
-    └── SKILL.md               # 唯一流程文档：部署检查 + 自动化任务模板
+    └── SKILL.md               # 唯一流程文档：部署 SOP + 分析 SOP（评估→洞察→挖掘）
 ```
 
 数据目录：
 
 ```text
-fomor/
-├── config/
-│   ├── settings.json
-│   └── preferences.json
+~/.fomor/
+├── config.json                # {"timezone": "Asia/Shanghai", "schedule": "03:00"}
 ├── events/
-│   ├── 2026-11-24.jsonl
-│   └── 2026-11-25.jsonl
+│   └── 2026-11-25.jsonl       # 按天归档；8 天前的文件由 Agent 在分析第 0 步删除
 ├── topics/
-│   ├── topic_x.json
-│   └── topic_y.json
+│   └── <slug>.json            # 长期话题（兴趣沉淀于此）
 ├── discoveries/
-│   ├── pending/               # observing，等待次日反馈
-│   └── promoted/              # 已进入长期记忆（可只留摘要）
-├── tombstones/                # 过期后的指纹，避免重复推荐（90 天）
-├── reports/                   # 每次运行的输出副本；可选 HTML 日报
-├── runtime/
-│   ├── runs.json
-│   └── state.json
-├── backup/
-└── logs/
+│   └── <slug>.json            # status: observing / promoted / expired（expired 即删除）
+├── reports/
+│   └── latest.md              # 最近一次报告（另有按天副本）
+└── runtime/
+    └── state.json             # {"last_analyzed_at": "..."}，时间窗依据
 ```
 
 设计原则：
 
 1. 原始 Event 与长期 Topic 分开保存。
 2. 每个 Topic、Discovery 使用独立文件。
-3. Event 使用按天 JSONL 追加写入，避免整文件重写。
-4. Event 可通过 `topic_id` 关联 Topic；删除 Event 不应影响 Topic。
+3. Event 使用按天 JSONL 追加写入；分析窗口由 `state.json` 的 `last_analyzed_at` 划定，无需逐条标记。
+4. 分析由 Agent 按 SOP 执行，文件读写就是它的数据操作；脚本不做分析。
 5. 使用原子写入（临时文件 + rename），避免文件损坏。
-6. 需要考虑文件锁或单写队列，避免 Hook 与自动化任务并发写入冲突。
-7. 重要数据应有备份和恢复机制。
-8. 原始问题需考虑脱敏、权限与保留期限。
-9. 数据根目录权限设为 `0700`，只使用 `~/.fomor/`，不写入 Trae 安装目录或插件目录。
+6. 原始问题需考虑脱敏、权限与保留期限。
+7. 数据根目录权限设为 `0700`，只使用 `~/.fomor/`，不写入 Trae 安装目录或插件目录。
 
-**路径解析顺序**：`FOMOR_HOME` → `~/.fomor/`（默认）。解析结果写入 `config/settings.json`，后续运行保持一致。
+**路径解析顺序**：`FOMOR_HOME` → `~/.fomor/`（默认）。
 
 **仍需验证的风险**：
 

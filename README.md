@@ -4,66 +4,54 @@
 
 ## 当前架构
 
-- 采集：Trae `UserPromptSubmit` Hook，事件写入本地
-- 调度与分析：Trae 自动化任务，每天在配置的时间触发（默认 03:00）
-- 补跑：`SessionStart` Hook 执行 `session-start`，先校验/静默补齐环境，再补上睡眠期间错过的每日分析
-- 长期记忆：`~/.fomor/` 下的文件结构（可用 `FOMOR_HOME` 覆盖）
-- 交付：自动化任务对话流 + `~/.fomor/reports/`（不做独立网页）
-- 反馈：次日分析时先回看用户提问，有兴趣的移入长期记忆，其余到期删除
+**分析由 Agent 执行，脚本只做采集。** 不需要用户配置任何模型参数——Trae 自动化任务里的 Agent 就是分析引擎。
+
+```text
+UserPromptSubmit Hook ──► events/ 落盘（唯一脚本职责）
+SessionStart Hook    ──► 静默创建/校验 ~/.fomor/
+每天 <schedule> 自动化任务 ──► Agent 按 skills/SKILL.md 的 SOP 执行：
+        反馈回看 → 评估 → 洞察 → 挖掘 → 报告 + 长期记忆
+```
+
+- 长期记忆：`~/.fomor/` 下的文件（topics / discoveries / reports）
+- 反馈：每次分析先回看——被追问的探索提升进 topics，无人问津的到期删除
+- 交付：自动化任务对话流 + `~/.fomor/reports/latest.md`
 
 ## 快速开始
 
 ```bash
-scripts/fomor init
-```
-
-采集一条事件（模拟 Trae Hook 的 stdin）：
-
-```bash
-printf '%s' '{"session_id":"demo","prompt":"如何把本地数据库迁移到云端？","hook_event_name":"UserPromptSubmit"}' | scripts/fomor hook
-```
-
-跑一次分析（默认离线 mock 模型）：
-
-```bash
-scripts/fomor analyze
+scripts/fomor session-start --verbose   # 创建/校验 ~/.fomor
+printf '%s' '{"session_id":"demo","prompt":"如何把本地数据库迁移到云端？"}' | scripts/fomor hook
 scripts/fomor status
 ```
 
-报告写入 `~/.fomor/reports/latest.md`。
+分析不需要跑命令：让 Agent 读 `skills/SKILL.md` 的「每日分析 SOP」执行即可（或由自动化任务每天自动执行）。
 
 ## 目录结构
 
 ```text
 scripts/
-└── fomor               唯一可执行入口（单文件，含全部逻辑与提示词契约）
+└── fomor               唯一脚本（~10KB）：hook 采集 / session-start / status
 hooks/
-└── hooks.json          UserPromptSubmit 采集 + SessionStart 环境校验/补跑
+└── hooks.json          UserPromptSubmit 采集 + SessionStart 环境校验
 skills/
-└── SKILL.md            唯一流程文档：部署检查、自动化任务模板、数据速查
+└── SKILL.md            唯一流程文档：部署 SOP + 分析 SOP（评估→洞察→挖掘）
 docs/                   维护者文档，不参与运行时
 tests/                  标准库 unittest
 .trae-plugin/plugin.json
 ```
 
-约定：
+复杂度控制：
 
-- 运行时只有四个文件：`plugin.json`、`hooks/hooks.json`、`scripts/fomor`、`skills/SKILL.md`
-- 提示词契约内嵌在 `scripts/fomor`（与解析代码强耦合），不单独放参考文件
-- 模型执行流程只读 `skills/SKILL.md` 一个文档
-- `docs/` 是维护者文档，不注入运行时
-
-运行时数据全部在 `~/.fomor/`：`events/`、`topics/`、`discoveries/{pending,promoted}`、`tombstones/`、`reports/`、`runtime/`、`logs/`、`backup/`。仓库不携带任何数据目录；首次使用时由 `SessionStart` 静默创建。
+- 脚本只做三件事：采集、环境校验、状态概览；没有分析管线、模型后端、调度器、备份
+- 模型文件为零：分析方法是 SOP 里的推理链（Agent 读取并执行）
+- 数据只有 5 类：events / topics / discoveries / reports / runtime（含一个 state.json）
 
 ## 接入 Trae
 
-分工：`SessionStart` 只做静默环境校验与补跑；**自动化任务由 Agent 在用户调用技能时代为创建**，流程在 [skills/SKILL.md](skills/SKILL.md)。
-
-1. 插件清单 [.trae-plugin/plugin.json](.trae-plugin/plugin.json) 通过 `hooks` 字段引用 [hooks/hooks.json](hooks/hooks.json)。
-2. 若 Trae 未自动加载插件 Hook：把 `hooks/hooks.json` 复制到全局 `hooks.json`，将 `${TRAE_PLUGIN_ROOT}` 替换为仓库绝对路径，然后在「设置 > Hooks」启用并信任。项目级 Hook 还需信任工作区。
-3. 对 Agent 说「安装/检查 Fomor」：它会执行 `session-start --verbose`、核对 Hook、按模板创建每天 `<schedule>`（默认 03:00）的本地自动化任务并验收。
-
-Hook 只写本地文件、stdout 为空、退出码始终为 0，不会阻断用户提问，也不向 Agent 注入内容。
+1. 把 [hooks/hooks.json](hooks/hooks.json) 内容合并到全局 `hooks.json`（`${TRAE_PLUGIN_ROOT}` 替换为仓库绝对路径），在「设置 > Hooks」启用。
+2. 对 Agent 说「安装/检查 Fomor」：它执行 `session-start --verbose`、核对 Hook、**代用户创建**每天 `<schedule>` 的自动化任务（任务内容见 SKILL 的 A3 模板）并验收。
+3. 之后无需人工干预；日常查看 `cat ~/.fomor/reports/latest.md`。
 
 ## 开发
 

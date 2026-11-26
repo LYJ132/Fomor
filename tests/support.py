@@ -11,8 +11,3 @@ _spec = importlib.util.spec_from_loader("fomor", _loader)
 fomor = importlib.util.module_from_spec(_spec)
 sys.modules["fomor"] = fomor
 _loader.exec_module(fomor)
-
-# The implementation is one file; expose its sections under the old module
-# names so tests read naturally (`from fomor.store import append_event`).
-for _name in ("utils", "paths", "config", "store", "prompts", "llm", "feedback", "scheduler", "pipeline", "cli"):
-    sys.modules[f"fomor.{_name}"] = fomor

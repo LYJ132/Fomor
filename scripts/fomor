@@ -1,226 +1,85 @@
 #!/usr/bin/env python3
-"""Fomor - a local exploration assistant for Trae.
+"""Fomor - collect the user's Trae prompts and verify the local environment.
 
-Single-file CLI, matching the plugin convention: ``scripts/fomor`` is the only
-executable entry point. Prompt/reference material lives in ``references/`` at
-the repository root; user data is created silently under ``~/.fomor/``.
+Daily analysis is executed by the Trae agent following skills/SKILL.md; this
+script is deliberately tiny: it never runs an LLM and has exactly three
+commands:
 
-Commands:
-    init           create ~/.fomor and default settings
-    session-start  verify/repair the local environment, then catch up
-    hook           read a Trae UserPromptSubmit payload from stdin
-    status         show counts and schedule state
-    analyze        run feedback review and analysis
-    catch-up       spawn analysis if the configured daily run was missed
-    prompts        list prompt tasks
+    hook           read a Trae UserPromptSubmit payload from stdin and store it
+    session-start  silently create/verify ~/.fomor (SessionStart hook)
+    status         print counts, schedule and the last analysis time
+
+The hook prints nothing on stdout (its output would be injected into the
+session) and always exits 0 (it must never block the user's turn).
 """
 
 from __future__ import annotations
 
 import argparse
-import contextlib
 import hashlib
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
-import tempfile
-import urllib.request
-import uuid
-from concurrent.futures import ThreadPoolExecutor
-from copy import deepcopy
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from zoneinfo import ZoneInfo
 
-try:  # POSIX
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None  # type: ignore[assignment]
+__version__ = "0.4.0"
 
-__version__ = "0.3.0"
-
+DEFAULT_CONFIG = {"timezone": "Asia/Shanghai", "schedule": "03:00"}
+DEDUPE_DAYS = 2  # same message within this window is dropped (hooks may merge)
+RETENTION_DAYS = 8  # event day-files older than this are deleted by the agent
 
 
-# ============================================================================
-# utils
-# ============================================================================
-
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def to_iso(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat(timespec="seconds")
-
-
-def parse_iso(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def local_day(value: datetime, tz_name: str) -> str:
-    return value.astimezone(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
-
-
-def new_id(prefix: str) -> str:
-    stamp = utcnow().strftime("%Y%m%d%H%M%S")
-    return f"{prefix}_{stamp}_{uuid.uuid4().hex[:6]}"
-
-
-def sha256_text(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+# ----------------------------------------------------------------------------
+# small helpers
+# ----------------------------------------------------------------------------
 
 
 def normalize_text(value: str) -> str:
-    return re.sub(r"\s+", " ", (value or "").strip()).lower()
+    return re.sub(r"\s+", " ", value).strip().lower()
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def to_iso(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat()
+
+
+def parse_iso(value: str) -> datetime:
+    return datetime.fromisoformat(value)
+
+
+def local_day(moment: datetime, tz_name: str) -> str:
+    return moment.astimezone(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
 
 
 def read_json(path: Path, default: Any = None) -> Any:
-    if not path.exists():
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return default
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def atomic_write_json(path: Path, payload: Any) -> None:
+def atomic_write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_name, path)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(tmp_name)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
 
 
-def append_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
-    if not records:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        for record in records:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+# ----------------------------------------------------------------------------
+# home layout: ~/.fomor (or $FOMOR_HOME)
+# ----------------------------------------------------------------------------
 
 
-def read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
-    if not path.exists():
-        return
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-
-@contextlib.contextmanager
-def file_lock(path: Path) -> Iterator[None]:
-    """Best-effort advisory lock; no-op where fcntl is unavailable."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+", encoding="utf-8") as handle:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
-@contextlib.contextmanager
-def try_file_lock(path: Path) -> Iterator[bool]:
-    """Non-blocking advisory lock; yields False when another process holds it."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = path.open("a+", encoding="utf-8")
-    acquired = True
-    if fcntl is not None:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            acquired = False
-    try:
-        yield acquired
-    finally:
-        if acquired and fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
-
-
-def tokenize(value: str) -> set[str]:
-    """Cheap mixed Chinese/English tokenizer for skeleton matching.
-
-    English words of length >= 2 plus Chinese character bigrams.  Good enough
-    for local feedback attribution before embeddings are introduced.
-    """
-    text = normalize_text(value)
-    tokens = {word for word in re.findall(r"[a-z0-9_\-.]{2,}", text)}
-    chinese = re.findall(r"[\u4e00-\u9fff]+", text)
-    for chunk in chinese:
-        if len(chunk) == 1:
-            tokens.add(chunk)
-        else:
-            tokens.update(chunk[index : index + 2] for index in range(len(chunk) - 1))
-    return tokens
-
-
-def similarity(left: str, right: str) -> float:
-    left_tokens, right_tokens = tokenize(left), tokenize(right)
-    if not left_tokens or not right_tokens:
-        return 0.0
-    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
-
-
-def extract_json(text: str) -> Any:
-    text = (text or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.S)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    match = re.search(r"[\[{].*[\]}]", text, flags=re.S)
-    if not match:
-        raise ValueError("no JSON object found in model output")
-    return json.loads(match.group(0))
-
-
-# ============================================================================
-# paths
-# ============================================================================
-
-@dataclass(frozen=True)
-class FomorPaths:
-    root: Path
-
-    @classmethod
-    def resolve(cls, home: str | os.PathLike[str] | None = None) -> "FomorPaths":
-        if home:
-            root = Path(home).expanduser()
-        else:
-            root = Path(os.environ.get("FOMOR_HOME", "~/.fomor")).expanduser()
-        return cls(root=root)
-
-    @property
-    def config_dir(self) -> Path:
-        return self.root / "config"
-
-    @property
-    def settings_file(self) -> Path:
-        return self.config_dir / "settings.json"
+class Home:
+    def __init__(self, root: Path):
+        self.root = root
 
     @property
     def events_dir(self) -> Path:
@@ -235,18 +94,6 @@ class FomorPaths:
         return self.root / "discoveries"
 
     @property
-    def pending_dir(self) -> Path:
-        return self.discoveries_dir / "pending"
-
-    @property
-    def promoted_dir(self) -> Path:
-        return self.discoveries_dir / "promoted"
-
-    @property
-    def tombstones_dir(self) -> Path:
-        return self.root / "tombstones"
-
-    @property
     def reports_dir(self) -> Path:
         return self.root / "reports"
 
@@ -255,1595 +102,128 @@ class FomorPaths:
         return self.root / "runtime"
 
     @property
+    def config_file(self) -> Path:
+        return self.root / "config.json"
+
+    @property
     def state_file(self) -> Path:
-        return self.runtime_dir / "state.json"
+        return self.root / "runtime" / "state.json"
 
-    @property
-    def runs_file(self) -> Path:
-        return self.runtime_dir / "runs.json"
-
-    @property
-    def lock_file(self) -> Path:
-        return self.runtime_dir / "analyze.lock"
-
-    @property
-    def catchup_lock_file(self) -> Path:
-        return self.runtime_dir / "catchup.lock"
-
-    @property
-    def logs_dir(self) -> Path:
-        return self.root / "logs"
-
-    @property
-    def backup_dir(self) -> Path:
-        return self.root / "backup"
-
-    def ensure(self) -> "FomorPaths":
-        for path in (
-            self.config_dir,
+    def ensure(self) -> None:
+        for directory in (
+            self.root,
             self.events_dir,
             self.topics_dir,
-            self.pending_dir,
-            self.promoted_dir,
-            self.tombstones_dir,
+            self.discoveries_dir,
             self.reports_dir,
             self.runtime_dir,
-            self.logs_dir,
-            self.backup_dir,
         ):
-            path.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(self.root, 0o700)
+            directory.mkdir(parents=True, exist_ok=True)
+        try:  # POSIX only
+            self.root.chmod(0o700)
         except OSError:
             pass
-        return self
+        if not self.config_file.exists():
+            atomic_write_json(self.config_file, DEFAULT_CONFIG)
 
-    def event_file(self, day: str) -> Path:
-        return self.events_dir / f"{day}.jsonl"
+    def config(self) -> dict[str, Any]:
+        data = read_json(self.config_file, default=dict(DEFAULT_CONFIG)) or dict(DEFAULT_CONFIG)
+        merged = dict(DEFAULT_CONFIG)
+        merged.update({k: v for k, v in data.items() if k in DEFAULT_CONFIG})
+        return merged
 
-
-# ============================================================================
-# config
-# ============================================================================
-
-DEFAULT_CONFIG: dict[str, Any] = {
-    "version": 1,
-    "timezone": "Asia/Shanghai",
-    "schedule": {
-        "hour": 3,
-        "minute": 0,
-        # A run is considered due when it is older than the configured daily cutoff.
-        # The SessionStart catch-up uses this value to avoid running twice.
-        "catch_up_after_hours": 20,
-    },
-    "retention": {
-        "event_days": 8,
-        "feedback_days": 7,
-        "tombstone_days": 90,
-        "dedupe_days": 2,
-    },
-    "llm": {
-        "mode": "mock",  # mock | traecli | openai
-        "model": "gpt-4o-mini",
-        "base_url": "https://api.openai.com/v1",
-        "api_key_env": "FOMOR_LLM_API_KEY",
-        "temperature": 0.3,
-        "timeout": 180,
-        "traecli": "traecli",
-    },
-    "analysis": {
-        "max_events_per_run": 200,
-        "max_topics_per_run": 3,
-        "min_events_for_discovery": 1,
-    },
-    "scoring": {
-        "explore_threshold": 3.5,
-        "watch_threshold": 2.0,
-    },
-    "feedback": {
-        "strong_similarity": 0.18,
-        "weak_similarity": 0.06,
-    },
-    "search": {
-        "provider": "none",
-    },
-}
+    def state(self) -> dict[str, Any]:
+        return read_json(self.state_file, default={}) or {}
 
 
-def _merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    result = deepcopy(base)
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(result.get(key), dict):
-            result[key] = _merge(result[key], value)
-        else:
-            result[key] = value
-    return result
+def event_fingerprint(session_id: str, message: str) -> str:
+    return sha256_text(f"trae|{session_id}|{normalize_text(message)}")
 
 
-def load_config(paths: FomorPaths) -> dict[str, Any]:
-    user_config = read_json(paths.settings_file, default={}) or {}
-    return _merge(DEFAULT_CONFIG, user_config)
-
-
-def save_config(paths: FomorPaths, config: dict[str, Any]) -> None:
-    atomic_write_json(paths.settings_file, config)
-
-
-def ensure_initialized(paths: FomorPaths) -> dict[str, Any]:
-    paths.ensure()
-    config = load_config(paths)
-    if not paths.settings_file.exists():
-        save_config(paths, config)
-    return config
-
-
-# ============================================================================
-# store
-# ============================================================================
-
-Event = dict[str, Any]
-Topic = dict[str, Any]
-Discovery = dict[str, Any]
-
-
-def event_fingerprint(payload: dict[str, Any]) -> str:
-    session = str(payload.get("session_id") or "")
-    prompt = normalize_text(str(payload.get("user_message") or ""))
-    return sha256_text(f"trae|{session}|{prompt}")
-
-
-def normalize_hook_payload(payload: dict[str, Any], now: datetime | None = None) -> Event:
-    """Keep only fields with a concrete reader (see references/07-data-model.md)."""
-    moment = now or utcnow()
-    prompt = str(payload.get("prompt") or payload.get("user_message") or "").strip()
-    event: Event = {
-        "event_id": payload.get("event_id") or f"evt_{moment.strftime('%Y%m%d%H%M%S')}_{sha256_text(prompt)[:6]}",
-        "session_id": str(payload.get("session_id") or ""),
+def normalize_hook_payload(payload: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+    """Keep only fields with a concrete reader; the agent does the rest."""
+    moment = now or datetime.now(timezone.utc)
+    message = str(payload.get("prompt") or payload.get("user_message") or "").strip()
+    session_id = str(payload.get("session_id") or "")
+    return {
+        "event_id": f"evt_{moment.strftime('%Y%m%d%H%M%S')}_{sha256_text(message)[:6]}",
+        "session_id": session_id,
         "timestamp": to_iso(moment),
-        "user_message": prompt,
-        "fingerprint": "",
-        "analyzed_at": None,
+        "user_message": message,
+        "fingerprint": event_fingerprint(session_id, message),
     }
-    event["fingerprint"] = event_fingerprint(event)
-    return event
 
 
-def find_event_by_fingerprint(paths: FomorPaths, fingerprint: str, days: int) -> Event | None:
-    cutoff = utcnow() - timedelta(days=days)
-    for event in iter_events(paths, since=cutoff):
-        if event.get("fingerprint") == fingerprint:
-            return event
-    return None
+def find_duplicate(home: Home, fingerprint: str) -> bool:
+    for path in sorted(home.events_dir.glob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if record.get("fingerprint") == fingerprint:
+                return True
+    return False
 
 
-def append_event(paths: FomorPaths, config: dict[str, Any], event: Event) -> tuple[Event, bool]:
-    """Append unless the same message was already collected recently."""
-    days = int(config["retention"]["dedupe_days"])
-    existing = find_event_by_fingerprint(paths, event["fingerprint"], days)
-    if existing:
-        return existing, True
+def append_event(home: Home, payload: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
+    """Store the prompt. Returns (event, duplicate)."""
+    event = normalize_hook_payload(payload)
+    if not event["user_message"]:
+        return None, False
+    if find_duplicate(home, event["fingerprint"]):
+        return event, True
+    config = home.config()
     day = local_day(parse_iso(event["timestamp"]), config["timezone"])
-    path = paths.event_file(day)
-    append_jsonl(path, [event])
+    path = home.events_dir / f"{day}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, ensure_ascii=False) + "\n")
     return event, False
 
 
-def iter_events(
-    paths: FomorPaths,
-    since: datetime | None = None,
-    until: datetime | None = None,
-) -> Iterable[Event]:
-    for path in sorted(paths.events_dir.glob("*.jsonl")):
-        for event in read_jsonl(path):
-            try:
-                moment = parse_iso(event["timestamp"])
-            except (KeyError, ValueError):
-                continue
-            if since and moment < since:
-                continue
-            if until and moment >= until:
-                continue
-            yield event
-
-
-def mark_events_analyzed(paths: FomorPaths, events: list[Event], at: datetime) -> None:
-    """Rewrite only the affected daily files, preserving other records."""
-    ids = {event["event_id"] for event in events}
-    if not ids:
-        return
-    by_file: dict[Path, list[Event]] = {}
-    for path in paths.events_dir.glob("*.jsonl"):
-        records = list(read_jsonl(path))
-        changed = False
-        for record in records:
-            if record.get("event_id") in ids:
-                record["analyzed_at"] = to_iso(at)
-                changed = True
-        if changed:
-            by_file[path] = records
-    for path, records in by_file.items():
-        _rewrite_jsonl(path, records)
-
-
-def _rewrite_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        for record in records:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-    tmp.replace(path)
-
-
-def save_topic(paths: FomorPaths, topic: Topic) -> None:
-    atomic_write_json(paths.topics_dir / f"{topic['topic_id']}.json", topic)
-
-
-def load_topic(paths: FomorPaths, topic_id: str) -> Topic | None:
-    return read_json(paths.topics_dir / f"{topic_id}.json")
-
-
-def list_topics(paths: FomorPaths) -> list[Topic]:
-    topics = []
-    for path in sorted(paths.topics_dir.glob("*.json")):
-        payload = read_json(path)
-        if payload:
-            topics.append(payload)
-    return topics
-
-
-def save_discovery(paths: FomorPaths, discovery: Discovery) -> Path:
-    status = discovery.get("status", "observing")
-    directory = paths.promoted_dir if status == "promoted" else paths.pending_dir
-    path = directory / f"{discovery['discovery_id']}.json"
-    atomic_write_json(path, discovery)
-    return path
-
-
-def load_discovery(paths: FomorPaths, discovery_id: str) -> Discovery | None:
-    for directory in (paths.pending_dir, paths.promoted_dir):
-        payload = read_json(directory / f"{discovery_id}.json")
-        if payload:
-            return payload
-    return None
-
-
-def list_discoveries(paths: FomorPaths, status: str | None = None) -> list[Discovery]:
-    result: list[Discovery] = []
-    directories = []
-    if status in (None, "observing"):
-        directories.append(paths.pending_dir)
-    if status in (None, "promoted"):
-        directories.append(paths.promoted_dir)
-    for directory in directories:
-        for path in sorted(directory.glob("*.json")):
-            payload = read_json(path)
-            if payload:
-                result.append(payload)
-    return result
-
-
-def promote_discovery(paths: FomorPaths, discovery: Discovery) -> None:
-    discovery["status"] = "promoted"
-    discovery["promoted_at"] = to_iso(utcnow())
-    save_discovery(paths, discovery)
-    pending = paths.pending_dir / f"{discovery['discovery_id']}.json"
-    if pending.exists():
-        pending.unlink()
-
-
-def expire_discovery(paths: FomorPaths, discovery: Discovery, config: dict[str, Any]) -> None:
-    pending = paths.pending_dir / f"{discovery['discovery_id']}.json"
-    if pending.exists():
-        pending.unlink()
-    tombstone = {
-        "discovery_id": discovery["discovery_id"],
-        "topic_id": discovery.get("topic_id"),
-        "fingerprint": sha256_text(
-            " ".join(
-                [
-                    str(discovery.get("topic_name") or ""),
-                    str(discovery.get("title") or ""),
-                    " ".join(solution.get("name", "") for solution in discovery.get("other_solutions", [])),
-                ]
-            )
-        ),
-        "expired_at": to_iso(utcnow()),
-        "retention_days": int(config["retention"]["tombstone_days"]),
-    }
-    atomic_write_json(paths.tombstones_dir / f"{discovery['discovery_id']}.json", tombstone)
-
-
-def load_state(paths: FomorPaths) -> dict[str, Any]:
-    return read_json(paths.state_file, default={}) or {}
-
-
-def save_state(paths: FomorPaths, state: dict[str, Any]) -> None:
-    atomic_write_json(paths.state_file, state)
-
-
-def append_run(paths: FomorPaths, record: dict[str, Any]) -> None:
-    runs = read_json(paths.runs_file, default={"runs": []}) or {"runs": []}
-    runs.setdefault("runs", []).append(record)
-    runs["runs"] = runs["runs"][-200:]
-    atomic_write_json(paths.runs_file, runs)
-
-
-def cleanup_events(paths: FomorPaths, config: dict[str, Any]) -> int:
-    """Delete whole day files older than retention; never split a day."""
-    cutoff = utcnow() - timedelta(days=int(config["retention"]["event_days"]))
-    cutoff_day = local_day(cutoff, config["timezone"])
-    removed = 0
-    for path in paths.events_dir.glob("*.jsonl"):
-        if path.stem < cutoff_day:
-            path.unlink()
-            removed += 1
-    return removed
-
-
-def backup_data(paths: FomorPaths, keep: int = 7) -> Path:
-    stamp = utcnow().strftime("%Y%m%d%H%M%S")
-    target = paths.backup_dir / f"fomor-{stamp}"
-    target.mkdir(parents=True, exist_ok=True)
-    for name in ("config", "topics", "discoveries", "tombstones"):
-        source = paths.root / name
-        if source.exists():
-            shutil.copytree(source, target / name, dirs_exist_ok=True)
-    backups = sorted(path for path in paths.backup_dir.glob("fomor-*") if path.is_dir())
-    for old in backups[:-keep]:
-        shutil.rmtree(old, ignore_errors=True)
-    return target
-
-
-# ============================================================================
-# prompts
-# ============================================================================
-
-# Prompts are embedded: they are JSON contracts parsed by this script, so keeping
-# them next to the parsing code (instead of in loose reference files) makes the
-# plugin a single self-contained executable.
-SYSTEM_PROMPT = """
-# Fomor 分析引擎：全局规则
-
-你是 Fomor 的分析引擎，服务于一个「发现其他解决方案」的探索助手。你的工作不是总结资讯，而是从用户真实的提问中理解问题，并发现值得尝试的其他解决路径。
-
-## 必须遵守
-
-1. **只使用输入证据。** 每一个关于用户目标、当前做法、阻碍的判断，都必须能指向具体事件 ID 或原始表述。
-2. **区分事实与推断。** 明确区分「用户说了什么」「我推断什么」「我还不知道什么」。证据不足时输出多个假设或 `unknown`，不要补全。
-3. **不为推荐而制造问题。** 如果当前方案已经足够好，直接给出 `none` 或 `watch`。
-4. **不追逐热点。** 「新」既包括最近出现的技术，也包括用户从未接触过的成熟方法、不同工作方式或范式变化。
-5. **方案必须具体。** 说明核心思路、工作流程、所需组件、优势、限制、前置条件和适用场景，不能只给工具名。
-6. **输出严格 JSON。** 不要输出 Markdown 代码围栏、解释文字或额外段落；无法确定的字段用 `null`、空数组或 `unknown`。
-7. **使用中文。** 保留用户原始问题中的英文术语。
-
-## 判断顺序
-
-先理解问题，再判断是否值得探索，最后才生成方案。禁止直接从关键词跳到推荐。
-
-## 安全与隐私
-
-- 不推断用户身份、公司、位置等敏感信息。
-- 不把原始问题改写成可识别个人的描述。
-- 引用原文时保持最小必要范围。
-"""
-
-TASK_PROMPTS = {
-    "aggregate": """
-# 任务：问题聚合
-
-把一批用户问题聚合成少量「探索主题」。不要只按关键词相似度分组，要判断它们是否指向同一项工作、同一个目标或同一条解决路径。
-
-## 输入
-
-分析日期：{{date}}
-
-事件列表：
-
-{{events}}
-
-## 判断要求
-
-- 同一项目、同一会话不是充分条件；
-- 表面关键词不同但目标一致，可以合并；
-- 同一项目内完全无关的问题，不要强行合并；
-- 无法判断时，宁可单独成组，并说明原因；
-- 每组至少 1 条事件，最多不超过全部事件的 60%，除非确实只有一个主题。
-
-## 输出 JSON
-
-```json
-{
-  "topics": [
-    {
-      "name": "不超过 16 字的主题名",
-      "summary": "一句话说明这些问题的共同点",
-      "event_ids": ["evt_..."],
-      "reason": "为什么把它们放在一起；如果证据弱，明确说明",
-      "confidence": 0.0
-    }
-  ],
-  "unmerged_event_ids": ["evt_..."]
-}
-```
-""",
-    "understand": """
-# 任务：问题理解（六层模型）
-
-围绕主题「{{topic_name}}」，从事件中还原用户正在做什么、想实现什么、当前怎么做、卡在哪里。
-
-## 输入事件
-
-{{events}}
-
-## 六层要求
-
-1. **Observed Questions**：用户实际问的问题，保留原文。
-2. **User Activity / Context**：用户正在推进什么工作。不要做过度精细的意图分类。
-3. **Underlying Goal**：用户最终想实现什么。
-4. **Current Approach**：当前使用的工具、流程、职责划分、已做出的技术选择。
-5. **Friction / Constraints**：当前方式的阻碍与约束。
-6. **Root Problem Hypotheses**：值得解决的问题假设。每个假设必须有证据事件 ID 和置信度。
-
-## 约束
-
-- 不要求每一层都有确定答案；缺失就写 `unknown` 或空数组。
-- 多个竞争性假设要同时保留，不要强行选一个「最深刻」的。
-- 不要把「用户问了很多问题」本身当成根本问题。
-- 如果现有方案看起来已经足够好，在 `assessment` 中明确写出。
-
-## 输出 JSON
-
-```json
-{
-  "observed_questions": ["原文"],
-  "activity": "string",
-  "goal": "string",
-  "current_approach": "string",
-  "frictions": ["string"],
-  "root_problem_hypotheses": [
-    {
-      "hypothesis": "string",
-      "confidence": 0.0,
-      "evidence_event_ids": ["evt_..."],
-      "counter_evidence": "string or null"
-    }
-  ],
-  "open_questions": ["string"],
-  "assessment": "evidence_sufficient | weak | current_approach_is_fine",
-  "notes": "string"
-}
-```
-""",
-    "opportunity": """
-# 任务：探索机会评分
-
-判断「围绕该主题，是否存在值得用户了解的其它解决方案」。评分对象是问题空间，不是单条消息，也不是技术是否热门。
-
-## 输入
-
-主题：{{topic_name}}
-
-问题理解：
-
-{{understanding}}
-
-## 五个维度（1–5 分）
-
-| 维度 | 判断 |
-| --- | --- |
-| solution_space | 是否存在不同的解决路径，而不是只能继续当前做法 |
-| potential_gain | 新路径是否可能明显改善效率、稳定性或成本 |
-| cognitive_gain | 是否可能让用户接触到此前没考虑过的思路 |
-| applicability | 新路径是否与用户当前场景有实际联系 |
-| necessity | 用户当前方案是否已经足够好（越低表示越没必要探索） |
-
-## 硬性规则
-
-- 当前方案已经很好、或问题只是一次性报错：`decision = none`。
-- 只能给出模糊的「可以了解一下」：`decision = watch`。
-- 只有存在具体替代路径，且与输入证据相关：`decision = explore`。
-- 不要为了产出内容而抬高分数。
-
-## 输出 JSON
-
-```json
-{
-  "dimensions": {
-    "solution_space": 1,
-    "potential_gain": 1,
-    "cognitive_gain": 1,
-    "applicability": 1,
-    "necessity": 1
-  },
-  "total": 0.0,
-  "decision": "explore | watch | none",
-  "rationale": "必须引用问题理解中的证据或不确定性",
-  "blocking_questions": ["如果这些没答案就不该推荐"]
-}
-```
-""",
-    "explore": """
-# 任务：解决方案空间探索
-
-围绕主题「{{topic_name}}」，先想清楚有哪些不同的解决路径，再给出具体方案。
-
-## 输入
-
-问题理解：
-
-{{understanding}}
-
-机会评分：
-
-{{score}}
-
-## 要求
-
-先列出 2–4 个**探索方向**，再给出 3–5 个**具体方案**。方向可以互斥，也可以组合。
-
-每个方案必须包含：
-
-- 与当前方案的关系：`alternative`（替代）、`complementary`（互补）、`evolutionary`（演进）、`paradigm_shift`（范式变化）；
-- 核心机制与工作流程；
-- 所需组件；
-- 优势与限制；
-- 前置条件；
-- 适用场景；
-- 证据：优先真实项目、官方文档、论文或工程实践；没有证据时明确写 `unverified`，不要编造链接。
-
-至少包含一个不是「在当前技术栈内换工具」的方案。若跨领域类比能带来新思路，可以提出，但必须标注为假设。
-
-## 输出 JSON
-
-```json
-{
-  "directions": ["string"],
-  "solutions": [
-    {
-      "name": "string",
-      "core_idea": "string",
-      "workflow": "string",
-      "components": ["string"],
-      "advantages": ["string"],
-      "constraints": ["string"],
-      "requirements": ["string"],
-      "applicability": "string",
-      "relationship": "alternative",
-      "evidence": ["已验证来源或 unverified"],
-      "confidence": 0.0
-    }
-  ],
-  "search_queries": ["用于后续核验方案的检索词"],
-  "unknowns": ["仍需确认的事实"]
-}
-```
-""",
-    "discovery": """
-# 任务：生成 Discovery
-
-把一次探索整理成用户可阅读、可判断的结果。不要写成资讯摘要，也不要把搜索结果直接堆给用户。
-
-## 输入
-
-主题：{{topic_name}}
-
-近期事件：
-
-{{events}}
-
-问题理解：
-
-{{understanding}}
-
-机会评分：
-
-{{score}}
-
-方案探索：
-
-{{exploration}}
-
-## 输出要求
-
-1. 标题以用户问题或新思路为中心，不以工具名为中心；
-2. 说明「为什么是现在」：引用近期问题，但不要暴露过多原文；
-3. 对目标与根本问题保持不确定性，不要写成定论；
-4. 主方案讲清机制与流程，其他方案说明关系与适用条件；
-5. 比较不是「A 比 B 好」，而是「在什么条件下选哪个」；
-6. 证据只列真实存在的来源；没有就写 `unverified`；
-7. 给用户留下反馈入口的语义（继续深入 / 已了解 / 不相关），但当前版本不实现按钮。
-
-## 输出 JSON
-
-```json
-{
-  "title": "string",
-  "observed": "我观察到了什么",
-  "problem_statement": "你真正可能在解决什么问题",
-  "primary_solution_name": "必须来自输入方案",
-  "comparison": "与当前方式的区别、代价与适用条件",
-  "closing_question": "一个帮助用户判断的开放式问题",
-  "evidence": ["string"],
-  "confidence_notes": "哪些是推断，哪些还没确认"
-}
-```
-""",
-    "feedback": """
-# 任务：隐式反馈归因
-
-判断用户在观察窗内的新提问，是否对某条已交付的 Discovery 表现出兴趣。不要读心，只根据文本证据。
-
-## 输入
-
-Discovery：
-
-{{discovery}}
-
-观察窗内的事件（均发生在交付之后）：
-
-{{feedback_events}}
-
-## 判定
-
-- `strong`：再次提到同一方案/话题/链接，明确追问细节、要求继续、表示要尝试；
-- `weak`：询问同一主题下的相邻问题，但没有直接指向该 Discovery；
-- `negative`：明确表示已了解、不感兴趣、不相关；
-- `none`：没有相关提问。
-
-## 规则
-
-- 用户只是继续做日常工作，不等于对推荐感兴趣；
-- 同一句话可能同时涉及多个 Discovery，只选择证据最强的一个，并说明；
-- 无法判断时输出 `none`，不要过度归因；
-- 沉默不是负向信号。
-
-## 输出 JSON
-
-```json
-{
-  "signal": "strong | weak | negative | none",
-  "confidence": 0.0,
-  "matched_event_ids": ["evt_..."],
-  "reason": "引用具体表述，说明为什么",
-  "topic_update": {
-    "interest": "string or null",
-    "known": "string or null",
-    "dislike": "string or null"
-  }
-}
-```
-""",
-}
-
-def _render(template: str, variables: dict[str, Any]) -> str:
-    for key, value in variables.items():
-        if not isinstance(value, str):
-            value = json.dumps(value, ensure_ascii=False, indent=2)
-        template = template.replace("{{" + key + "}}", value)
-    return template
-
-
-def load_system() -> str:
-    return SYSTEM_PROMPT
-
-
-def build_prompt(task: str, variables: dict[str, Any]) -> str:
-    if task not in TASK_PROMPTS:
-        raise KeyError(f"unknown prompt task: {task}")
-    return load_system() + "\n\n---\n\n" + _render(TASK_PROMPTS[task], variables)
-
-
-def describe_tasks() -> list[str]:
-    return sorted(TASK_PROMPTS)
-
-
-# ============================================================================
-# llm
-# ============================================================================
-
-class LLMError(RuntimeError):
-    pass
-
-
-class BaseLLM:
-    def complete(self, task: str, variables: dict[str, Any]) -> str:
-        raise NotImplementedError
-
-    def json(self, task: str, variables: dict[str, Any]) -> Any:
-        return extract_json(self.complete(task, variables))
-
-
-class MockLLM(BaseLLM):
-    """Deterministic output that keeps the pipeline runnable without a model."""
-
-    def complete(self, task: str, variables: dict[str, Any]) -> str:
-        events = variables.get("events") or []
-        topic_name = variables.get("topic_name") or _topic_name(events)
-        if task == "aggregate":
-            payload: Any = {"topics": _mock_topics(events)}
-        elif task == "understand":
-            payload = _mock_understanding(topic_name, events)
-        elif task == "opportunity":
-            payload = {
-                "dimensions": {
-                    "solution_space": 4,
-                    "potential_gain": 4,
-                    "cognitive_gain": 4,
-                    "applicability": 4,
-                    "necessity": 3,
-                },
-                "total": 3.8,
-                "decision": "explore",
-                "rationale": "Mock 评分：当前主题存在多个可替代路径，且与用户场景相关。",
-            }
-        elif task == "explore":
-            payload = _mock_exploration(topic_name)
-        elif task == "discovery":
-            payload = {
-                "title": f"当「{topic_name}」开始变复杂，可以先换一种拆法",
-                "observed": f"最近共记录到 {len(events)} 条相关问题，可能围绕同一主题。",
-                "comparison": "当前做法更偏向在现有结构内优化；另一条路径是先重新划分职责边界。",
-            }
-        elif task == "feedback":
-            payload = {
-                "signal": "none",
-                "confidence": 0.0,
-                "reason": "Mock 不执行归因；真实模式由模型判断。",
-            }
+def count_events(home: Home) -> int:
+    total = 0
+    for path in home.events_dir.glob("*.jsonl"):
+        total += sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+    return total
+
+
+def count_discoveries(home: Home) -> tuple[int, int]:
+    observing = promoted = 0
+    for path in home.discoveries_dir.glob("*.json"):
+        data = read_json(path, default={}) or {}
+        if data.get("status") == "promoted":
+            promoted += 1
         else:
-            raise LLMError(f"unknown task: {task}")
-        return json.dumps(payload, ensure_ascii=False)
+            observing += 1
+    return observing, promoted
 
 
-class TraeCliLLM(BaseLLM):
-    """Call ``traecli exec`` non-interactively and read the last message."""
-
-    def __init__(self, binary: str = "traecli", timeout: int = 180):
-        self.binary = binary
-        self.timeout = timeout
-
-    def complete(self, task: str, variables: dict[str, Any]) -> str:
-        prompt = build_prompt(task, variables)
-        with tempfile.NamedTemporaryFile("r", suffix=".txt", delete=False) as handle:
-            output_path = Path(handle.name)
-        try:
-            command = [
-                self.binary,
-                "exec",
-                "--skip-git-repo-check",
-                "--output-last-message",
-                str(output_path),
-                prompt,
-            ]
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                check=False,
-            )
-            if result.returncode != 0:
-                raise LLMError(result.stderr.strip() or f"traecli exited {result.returncode}")
-            return output_path.read_text(encoding="utf-8")
-        finally:
-            output_path.unlink(missing_ok=True)
-
-
-class OpenAICompatLLM(BaseLLM):
-    def __init__(self, base_url: str, model: str, api_key: str, temperature: float = 0.3, timeout: int = 180):
-        self.base_url = base_url.rstrip("/")
-        self.model = model
-        self.api_key = api_key
-        self.temperature = temperature
-        self.timeout = timeout
-
-    def complete(self, task: str, variables: dict[str, Any]) -> str:
-        payload = {
-            "model": self.model,
-            "temperature": self.temperature,
-            "messages": [
-                {"role": "system", "content": "You output strict JSON only."},
-                {"role": "user", "content": build_prompt(task, variables)},
-            ],
-        }
-        request = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            body = json.loads(response.read().decode("utf-8"))
-        return body["choices"][0]["message"]["content"]
-
-
-def build_llm(config: dict[str, Any]) -> BaseLLM:
-    mode = config["llm"].get("mode", "mock")
-    if mode == "mock":
-        return MockLLM()
-    if mode == "traecli":
-        return TraeCliLLM(
-            binary=config["llm"].get("traecli", "traecli"),
-            timeout=int(config["llm"].get("timeout", 180)),
-        )
-    if mode == "openai":
-
-        key = os.environ.get(config["llm"]["api_key_env"], "")
-        if not key:
-            raise LLMError(f"missing API key env: {config['llm']['api_key_env']}")
-        return OpenAICompatLLM(
-            base_url=config["llm"]["base_url"],
-            model=config["llm"]["model"],
-            api_key=key,
-            temperature=float(config["llm"].get("temperature", 0.3)),
-            timeout=int(config["llm"].get("timeout", 180)),
-        )
-    raise LLMError(f"unknown llm mode: {mode}")
-
-
-# --------------------------------------------------------------------------
-# Mock helpers
-
-
-def _topic_name(events: list[dict[str, Any]]) -> str:
-    if not events:
-        return "待探索主题"
-    first = str(events[0].get("user_message") or "").strip()
-    return first[:18] + ("…" if len(first) > 18 else "")
-
-
-def _mock_topics(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not events:
-        return []
-    name = _topic_name(events)
-    return [
-        {
-            "name": name,
-            "summary": f"{len(events)} 条问题可能围绕同一探索主题。",
-            "event_ids": [event["event_id"] for event in events],
-        }
-    ]
-
-
-def _mock_understanding(topic_name: str, events: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
-        "activity": f"围绕「{topic_name}」推进一项具体任务",
-        "goal": "把当前问题推进到稳定、可维护的方案",
-        "current_approach": "沿用现有工具与流程，在局部做优化",
-        "frictions": ["上下文分散", "方案是否适用尚未验证"],
-        "root_problem_hypotheses": [
-            {
-                "hypothesis": f"当前阻碍可能是「{topic_name}」缺少清晰的职责与边界",
-                "confidence": 0.5,
-                "evidence_event_ids": [event["event_id"] for event in events[:2]],
-            }
-        ],
-        "open_questions": ["当前方案最痛的约束是什么？", "是否必须沿用现有技术栈？"],
-        "notes": "Mock 输出，仅用于跑通结构。",
-    }
-
-
-def _mock_exploration(topic_name: str) -> dict[str, Any]:
-    return {
-        "directions": [
-            f"在「{topic_name}」内部做局部优化",
-            "换一种职责划分方式",
-            "把一次性流程演进为可恢复、可观测的流程",
-        ],
-        "solutions": [
-            {
-                "name": "职责分层",
-                "core_idea": "把变化快的部分与稳定的部分解耦，让每层只负责一件事。",
-                "workflow": "识别职责 → 拆分边界 → 定义接口 → 分别演进",
-                "components": ["现有服务", "清晰接口", "基础监控"],
-                "advantages": ["边界清晰", "便于独立演进"],
-                "constraints": ["前期需要接口设计", "跨层排障成本上升"],
-                "requirements": ["明确各层职责"],
-                "applicability": "系统开始变复杂、职责混杂时",
-                "relationship": "alternative",
-                "evidence": ["Mock 示例：接入真实搜索后补充可访问资料"],
-            },
-            {
-                "name": "补齐可观测性与失败恢复",
-                "core_idea": "不改变整体架构，先补上当前最痛的短板。",
-                "workflow": "定位失败点 → 增加日志/重试 → 验证恢复",
-                "components": ["日志", "重试", "告警"],
-                "advantages": ["改动小", "见效快"],
-                "constraints": ["不解决结构性问题"],
-                "requirements": ["能定位关键失败点"],
-                "applicability": "当前方案基本可用但稳定性不足时",
-                "relationship": "complementary",
-                "evidence": ["Mock 示例"],
-            },
-            {
-                "name": "演进为可恢复的工作流",
-                "core_idea": "把任务从一次性执行变成有状态、可恢复的流程。",
-                "workflow": "定义状态 → 持久化 → 失败恢复 → 观测",
-                "components": ["状态存储", "工作流引擎或任务队列"],
-                "advantages": ["可恢复", "可观测"],
-                "constraints": ["引入新的运行时组件"],
-                "requirements": ["任务需要长期运行或人工介入"],
-                "applicability": "任务规模与复杂度持续上升时",
-                "relationship": "evolutionary",
-                "evidence": ["Mock 示例"],
-            },
-        ],
-        "search_queries": [f"{topic_name} 架构 替代方案", f"{topic_name} 最佳实践"],
-    }
-
-
-# ============================================================================
-# feedback
-# ============================================================================
-
-NEGATIVE_MARKERS = ("已经了解", "我知道了", "不感兴趣", "不相关", "不需要", "用不上")
-STRONG_MARKERS = ("继续深入", "详细说说", "想试试", "怎么落地", "具体怎么做", "还能怎么做")
-
-
-def _discovery_text(discovery: Discovery) -> str:
-    parts = [str(discovery.get("topic_name") or ""), str(discovery.get("title") or "")]
-    for solution in [discovery.get("primary_solution"), *discovery.get("other_solutions", [])]:
-        if solution:
-            parts.append(str(solution.get("name") or ""))
-            parts.append(str(solution.get("core_idea") or ""))
-    return " ".join(parts)
-
-
-def _ensure_topic(paths: FomorPaths, discovery: Discovery) -> dict[str, Any]:
-    topic = load_topic(paths, discovery["topic_id"])
-    if topic:
-        return topic
-    now = to_iso(utcnow())
-    topic = {
-        "topic_id": discovery["topic_id"],
-        "name": discovery.get("topic_name") or "未命名主题",
-        "background": "由反馈回看补建的话题记录",
-        "project": None,
-        "user_goal": (discovery.get("problem_understanding") or {}).get("goal"),
-        "progress": [],
-        "introduced_solutions": [],
-        "known": [],
-        "interests": [],
-        "dislikes": [],
-        "practices": [],
-        "corrections": [],
-        "evidence": [],
-        "discovery_ids": [],
-        "status": "active",
-        "created_at": now,
-        "last_activity_at": now,
-        "feedback": [],
-    }
-    return topic
-
-
-def classify(discovery: Discovery, events: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, Any]:
-    """Heuristic attribution used by the offline skeleton."""
-    discovery_text = _discovery_text(discovery)
-    topic_name = str(discovery.get("topic_name") or "")
-    best = {"signal": "none", "confidence": 0.0, "event_id": None, "score": 0.0, "reason": ""}
-    for event in events:
-        message = str(event.get("user_message") or "")
-        if not message:
-            continue
-        if any(marker in message for marker in NEGATIVE_MARKERS) and topic_name and topic_name in message:
-            return {
-                "signal": "negative",
-                "confidence": 0.7,
-                "event_id": event["event_id"],
-                "score": 1.0,
-                "reason": "用户明确表示已了解或不感兴趣",
-            }
-        if any(marker in message for marker in STRONG_MARKERS) and similarity(discovery_text, message) >= float(
-            config["feedback"]["weak_similarity"]
-        ):
-            return {
-                "signal": "strong",
-                "confidence": 0.8,
-                "event_id": event["event_id"],
-                "score": 1.0,
-                "reason": "用户明确要求继续深入或尝试",
-            }
-        score = similarity(discovery_text, message)
-        if topic_name and len(topic_name) >= 4 and topic_name in message:
-            score = max(score, 0.3)
-        if score > best["score"]:
-            best = {
-                "signal": "none",
-                "confidence": 0.0,
-                "event_id": event["event_id"],
-                "score": score,
-                "reason": "",
-            }
-    strong = float(config["feedback"]["strong_similarity"])
-    weak = float(config["feedback"]["weak_similarity"])
-    if best["score"] >= strong:
-        best.update(signal="strong", confidence=min(0.9, 0.5 + best["score"]), reason="再次提到同一方案或主题")
-    elif best["score"] >= weak:
-        best.update(signal="weak", confidence=0.4, reason="询问同一主题下的相邻问题")
-    return best
-
-
-def evaluate_feedback(
-    paths: FomorPaths,
-    config: dict[str, Any],
-    events: list[dict[str, Any]],
-    run_id: str,
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    """Promote discoveries with interest, expire stale ones. Feedback first."""
-    moment = now or utcnow()
-    promoted, dismissed, expired, evaluated = [], [], [], []
-    for discovery in list_discoveries(paths, status="observing"):
-        delivered = parse_iso(discovery["created_at"])
-        if delivered >= moment:
-            continue
-        window_events = [
-            event
-            for event in events
-            if delivered <= parse_iso(event["timestamp"]) < moment
-            and event.get("event_id") not in discovery.get("feedback_event_ids", [])
-        ]
-        result = classify(discovery, window_events, config)
-        discovery["last_evaluated_run_id"] = run_id
-        discovery["last_evaluated_at"] = to_iso(moment)
-        evaluated.append(discovery["discovery_id"])
-
-        if result["signal"] in ("strong", "weak"):
-            topic = _ensure_topic(paths, discovery)
-            topic.setdefault("interests", []).append(
-                {
-                    "discovery_id": discovery["discovery_id"],
-                    "signal": result["signal"],
-                    "confidence": result["confidence"],
-                    "evidence_event_ids": [result["event_id"]] if result["event_id"] else [],
-                    "at": to_iso(moment),
-                }
-            )
-            topic.setdefault("evidence", []).extend(
-                event_id for event_id in [result["event_id"]] if event_id and event_id not in topic["evidence"]
-            )
-            if discovery["topic_id"] not in topic.get("discovery_ids", []):
-                topic.setdefault("discovery_ids", []).append(discovery["discovery_id"])
-            topic["last_activity_at"] = to_iso(moment)
-            save_topic(paths, topic)
-            discovery["feedback"] = result
-            promote_discovery(paths, discovery)
-            promoted.append(discovery["discovery_id"])
-            continue
-
-        if result["signal"] == "negative":
-            topic = _ensure_topic(paths, discovery)
-            topic.setdefault("dislikes", []).append(
-                {"discovery_id": discovery["discovery_id"], "reason": result["reason"], "at": to_iso(moment)}
-            )
-            topic["last_activity_at"] = to_iso(moment)
-            save_topic(paths, topic)
-            discovery["feedback"] = result
-            discovery["status"] = "dismissed"
-            save_discovery(paths, discovery)
-            pending = paths.pending_dir / f"{discovery['discovery_id']}.json"
-            if pending.exists():
-                pending.unlink()
-            dismissed.append(discovery["discovery_id"])
-            continue
-
-        if moment >= parse_iso(discovery["expires_at"]):
-            expire_discovery(paths, discovery, config)
-            expired.append(discovery["discovery_id"])
-        else:
-            save_discovery(paths, discovery)
-
-    return {
-        "evaluated": evaluated,
-        "promoted": promoted,
-        "dismissed": dismissed,
-        "expired": expired,
-    }
-
-
-# ============================================================================
-# scheduler
-# ============================================================================
-
-def latest_cutoff(now: datetime, config: dict[str, Any]) -> datetime:
-    tz = ZoneInfo(config["timezone"])
-    local = now.astimezone(tz)
-    cutoff = local.replace(
-        hour=int(config["schedule"]["hour"]),
-        minute=int(config["schedule"]["minute"]),
-        second=0,
-        microsecond=0,
-    )
-    if local < cutoff:
-        cutoff -= timedelta(days=1)
-    return cutoff.astimezone(ZoneInfo("UTC"))
-
-
-def next_cutoff(now: datetime, config: dict[str, Any]) -> datetime:
-    return latest_cutoff(now, config) + timedelta(days=1)
-
-
-def schedule_label(config: dict[str, Any]) -> str:
-    """Human-readable daily analysis time from the user's settings."""
-    return f"{int(config['schedule']['hour']):02d}:{int(config['schedule']['minute']):02d}"
-
-
-def is_due(paths: FomorPaths, config: dict[str, Any], now: datetime | None = None) -> bool:
-    moment = now or utcnow()
-    state = load_state(paths)
-    last = state.get("last_success_at")
-    if not last:
-        return True
-    return parse_iso(last) < latest_cutoff(moment, config)
-
-
-def catch_up(
-    paths: FomorPaths,
-    config: dict[str, Any],
-    detach: bool = True,
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    """Run catch-up analysis if the latest configured cutoff was missed."""
-    moment = now or utcnow()
-    if not is_due(paths, config, moment):
-        return {"status": "not_due", "checked_at": to_iso(moment)}
-
-    script = Path(__file__).resolve()
-    repo_root = script.parent.parent
-    command = [
-        sys.executable,
-        str(script),
-        "analyze",
-        "--scheduled",
-        "--home",
-        str(paths.root),
-    ]
-    if not detach:
-        return {"status": "running_inline", "command": command}
-
-    paths.ensure()
-    with try_file_lock(paths.catchup_lock_file) as acquired:
-        if not acquired:
-            return {"status": "busy", "checked_at": to_iso(moment)}
-        env = dict(os.environ)
-        log_path = paths.logs_dir / "catchup.log"
-        handle = log_path.open("a", encoding="utf-8")
-        handle.write(f"\n[{to_iso(moment)}] catch-up start\n")
-        handle.flush()
-        process = subprocess.Popen(
-            command,
-            stdout=handle,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            cwd=str(repo_root),
-            env=env,
-            start_new_session=True,
-            close_fds=True,
-        )
-    return {"status": "spawned", "pid": process.pid, "log": str(log_path), "checked_at": to_iso(moment)}
-
-
-def catch_up_inline(paths: FomorPaths, config: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
-    """Helper for tests / foreground CLI: return due status only."""
-    moment = now or utcnow()
-    return {
-        "due": is_due(paths, config, moment),
-        "latest_cutoff": to_iso(latest_cutoff(moment, config)),
-        "next_cutoff": to_iso(next_cutoff(moment, config)),
-    }
-
-
-def _safe_probe(probe) -> bool:
-    try:
-        return bool(probe())
-    except Exception:
-        return False
-
-
-def _ensure_dependencies() -> list[str]:
-    """Placeholder for future external dependencies.
-
-    The current implementation is standard-library only, so there is nothing
-    to download.  If a future version needs a binary, check it here and fetch
-    it silently; return the list of what was fetched.
-    """
-    return []
-
-
-def verify_environment(paths: FomorPaths, config: dict[str, Any]) -> dict[str, Any]:
-    """Check the local runtime in parallel and repair what is missing.
-
-    This is the first step of a SessionStart hook: folders and settings are
-    created silently on the user's machine; nothing is printed on success.
-    """
-    probes = {
-        "python": lambda: sys.version_info >= (3, 10),
-        "home": lambda: paths.root.exists() and os.access(paths.root, os.W_OK),
-        "settings": lambda: paths.settings_file.exists(),
-        "workspace": lambda: all(
-            path.exists()
-            for path in (
-                paths.events_dir,
-                paths.topics_dir,
-                paths.pending_dir,
-                paths.promoted_dir,
-                paths.reports_dir,
-                paths.runtime_dir,
-            )
-        ),
-    }
-    with ThreadPoolExecutor(max_workers=len(probes)) as pool:
-        results = dict(pool.map(lambda item: (item[0], _safe_probe(item[1])), probes.items()))
-    missing = [name for name, ok in results.items() if not ok]
-
-    if "python" in missing:
-        print("fomor: Python 3.10+ is required", file=sys.stderr)
-
-    repaired = []
-    if any(name in missing for name in ("home", "settings", "workspace")):
-        paths.ensure()
-        ensure_initialized(paths)
-        repaired = [name for name in missing if name != "python"]
-
-    return {
-        "ok": "python" not in missing,
-        "checked": sorted(results),
-        "missing": missing,
-        "repaired": repaired,
-        "dependencies": _ensure_dependencies(),
-    }
-
-
-# ============================================================================
-# pipeline
-# ============================================================================
-
-def _window_start(paths: FomorPaths, state: dict[str, Any], now: datetime) -> datetime:
-    last = state.get("last_success_at")
-    if last:
-        return parse_iso(last)
-    pending = list_discoveries(paths, status="observing")
-    if pending:
-        return min(parse_iso(item["created_at"]) for item in pending)
-    return now - timedelta(hours=24)
-
-
-def _find_topic(paths: FomorPaths, name: str) -> dict[str, Any] | None:
-    wanted = normalize_text(name)
-    for topic in list_topics(paths):
-        if normalize_text(topic.get("name", "")) == wanted:
-            return topic
-    return None
-
-
-def _upsert_topic(
-    paths: FomorPaths,
-    cluster: dict[str, Any],
-    understanding: dict[str, Any],
-    at: str,
-) -> dict[str, Any]:
-    topic = _find_topic(paths, cluster["name"])
-    if topic is None:
-        topic = {
-            "topic_id": new_id("topic"),
-            "name": cluster["name"],
-            "background": cluster.get("summary", ""),
-            "project": None,
-            "user_goal": understanding.get("goal"),
-            "progress": [],
-            "introduced_solutions": [],
-            "known": [],
-            "interests": [],
-            "dislikes": [],
-            "practices": [],
-            "corrections": [],
-            "evidence": [],
-            "discovery_ids": [],
-            "status": "active",
-            "created_at": at,
-            "last_activity_at": at,
-            "feedback": [],
-        }
-    topic["user_goal"] = understanding.get("goal") or topic.get("user_goal")
-    topic.setdefault("progress", []).append(
-        {"at": at, "note": understanding.get("activity") or "继续推进相关工作"}
-    )
-    topic["last_activity_at"] = at
-    return topic
-
-
-def _assemble_discovery(
-    topic: dict[str, Any],
-    cluster: dict[str, Any],
-    understanding: dict[str, Any],
-    score: dict[str, Any],
-    exploration: dict[str, Any],
-    rendered: dict[str, Any],
-    config: dict[str, Any],
-    now,
-) -> dict[str, Any]:
-    solutions = exploration.get("solutions") or []
-    primary = solutions[0] if solutions else {}
-    others = solutions[1:]
-    discovery_id = new_id("discovery")
-    created = to_iso(now)
-    return {
-        "discovery_id": discovery_id,
-        "topic_id": topic["topic_id"],
-        "topic_name": topic["name"],
-        "created_at": created,
-        "status": "observing",
-        "feedback_due_at": to_iso(next_cutoff(now, config)),
-        "expires_at": to_iso(now + timedelta(days=int(config["retention"]["feedback_days"]))),
-        "title": rendered.get("title") or f"关于「{topic['name']}」的另一条路径",
-        "observed": rendered.get("observed") or cluster.get("summary", ""),
-        "problem_understanding": understanding,
-        "score": score,
-        "directions": exploration.get("directions", []),
-        "primary_solution": primary,
-        "other_solutions": others,
-        "comparison": rendered.get("comparison", ""),
-        "closing_question": rendered.get("closing_question", ""),
-        "evidence": exploration.get("evidence") or rendered.get("evidence", []),
-        "confidence_notes": rendered.get("confidence_notes", ""),
-        "search_queries": exploration.get("search_queries", []),
-        "feedback": {"signal": "none", "confidence": 0.0, "reason": ""},
-        "feedback_event_ids": [],
-        "source_event_ids": cluster.get("event_ids", []),
-    }
-
-
-def _render_report(paths: FomorPaths, config: dict[str, Any], now, feedback: dict, discoveries: list[dict], skipped: str | None) -> str:
-    day = local_day(now, config["timezone"])
-    lines = [f"# Fomor 探索报告 · {day}", ""]
-    lines.append("## 反馈回看")
-    if not feedback["evaluated"]:
-        lines.append("今天没有待回看的探索结果。")
-    else:
-        lines.append(
-            f"评估 {len(feedback['evaluated'])} 条；"
-            f"移入长期记忆 {len(feedback['promoted'])} 条；"
-            f"明确不感兴趣 {len(feedback['dismissed'])} 条；"
-            f"过期 {len(feedback['expired'])} 条。"
-        )
-    lines.append("")
-    lines.append("## 本次新发现")
-    if skipped:
-        lines.append(skipped)
-    elif not discoveries:
-        lines.append("本次没有发现值得探索的新方向，不做硬推。")
-    for discovery in discoveries:
-        lines.append("")
-        lines.append(f"### {discovery['title']}")
-        lines.append("")
-        lines.append(discovery.get("observed", ""))
-        lines.append("")
-        understanding = discovery.get("problem_understanding", {})
-        lines.append(f"**可能在解决**：{understanding.get('goal') or 'unknown'}")
-        lines.append("")
-        lines.append(f"**当前方式**：{understanding.get('current_approach') or 'unknown'}")
-        lines.append("")
-        lines.append(f"**主要阻碍**：{'；'.join(understanding.get('frictions') or []) or 'unknown'}")
-        lines.append("")
-        primary = discovery.get("primary_solution") or {}
-        if primary:
-            lines.append(f"**一条值得了解的新思路：{primary.get('name', '')}**")
-            lines.append("")
-            lines.append(primary.get("core_idea", ""))
-            lines.append("")
-            lines.append(f"流程：{primary.get('workflow', '')}")
-            lines.append("")
-            lines.append(f"限制：{'；'.join(primary.get('constraints') or [])}")
-        others = discovery.get("other_solutions") or []
-        if others:
-            lines.append("")
-            lines.append("**其他可选方案**")
-            for solution in others:
-                lines.append(
-                    f"- {solution.get('name')}（{solution.get('relationship', 'unknown')}）："
-                    f"{solution.get('core_idea', '')}"
-                )
-        if discovery.get("comparison"):
-            lines.append("")
-            lines.append(f"**与当前方式的区别**：{discovery['comparison']}")
-        if discovery.get("closing_question"):
-            lines.append("")
-            lines.append(f"**留给你判断**：{discovery['closing_question']}")
-    lines.append("")
-    lines.append("---")
-    lines.append("如果这条探索对你有用，直接继续追问即可；没有追问的内容会在到期后自动删除。")
-    text = "\n".join(lines) + "\n"
-    paths.reports_dir.mkdir(parents=True, exist_ok=True)
-    (paths.reports_dir / f"{day}.md").write_text(text, encoding="utf-8")
-    (paths.reports_dir / "latest.md").write_text(text, encoding="utf-8")
-    return text
-
-
-def run_analysis(
-    paths: FomorPaths,
-    config: dict[str, Any] | None = None,
-    llm: BaseLLM | None = None,
-    now=None,
-    scheduled: bool = False,
-    make_backup: bool = True,
-) -> dict[str, Any]:
-    config = config or load_config(paths)
-    moment = now or utcnow()
-    paths.ensure()
-    with file_lock(paths.lock_file):
-        if scheduled and not is_due(paths, config, moment):
-            return {
-                "status": "skipped",
-                "reason": "not_due",
-                "report": f"还没到下一次 {schedule_label(config)}，且已有成功运行记录。",
-            }
-        state = load_state(paths)
-        run_id = new_id("run")
-        started = to_iso(moment)
-        window_start = _window_start(paths, state, moment)
-        recent_events = sorted(iter_events(paths, since=window_start, until=moment), key=lambda e: e["timestamp"])
-        feedback_events = sorted(
-            iter_events(
-                paths,
-                since=min(
-                    [parse_iso(item["created_at"]) for item in list_discoveries(paths, status="observing")]
-                    or [window_start]
-                ),
-                until=moment,
-            ),
-            key=lambda e: e["timestamp"],
-        )
-        feedback = evaluate_feedback(paths, config, feedback_events, run_id, moment)
-
-        new_events = [
-            event
-            for event in recent_events
-            if not event.get("analyzed_at")
-        ][: int(config["analysis"]["max_events_per_run"])]
-        skipped = None
-        discoveries: list[dict[str, Any]] = []
-        provider = llm or build_llm(config)
-
-        if len(new_events) < int(config["analysis"]["min_events_for_discovery"]):
-            skipped = "本次没有新的用户问题，暂不生成探索。"
-        else:
-            try:
-                aggregated = provider.json("aggregate", {"date": local_day(moment, config["timezone"]), "events": new_events})
-                clusters = aggregated.get("topics", [])[: int(config["analysis"]["max_topics_per_run"])]
-                by_id = {event["event_id"]: event for event in new_events}
-                for cluster in clusters:
-                    events = [by_id[event_id] for event_id in cluster.get("event_ids", []) if event_id in by_id]
-                    if not events:
-                        events = new_events
-                    understanding = provider.json(
-                        "understand",
-                        {"topic_name": cluster["name"], "events": events},
-                    )
-                    score = provider.json(
-                        "opportunity",
-                        {"topic_name": cluster["name"], "understanding": understanding},
-                    )
-                    decision = score.get("decision", "none")
-                    total = float(score.get("total", 0))
-                    if decision == "explore" and total < float(config["scoring"]["explore_threshold"]):
-                        decision = "watch"
-                    at = to_iso(moment)
-                    if decision != "explore":
-                        continue
-                    exploration = provider.json(
-                        "explore",
-                        {"topic_name": cluster["name"], "understanding": understanding, "score": score},
-                    )
-                    rendered = provider.json(
-                        "discovery",
-                        {
-                            "topic_name": cluster["name"],
-                            "events": events,
-                            "understanding": understanding,
-                            "score": score,
-                            "exploration": exploration,
-                        },
-                    )
-                    # Create the topic first, then attach the finalized discovery.
-                    topic = _upsert_topic(paths, cluster, understanding, at)
-                    discovery = _assemble_discovery(
-                        topic, cluster, understanding, score, exploration, rendered, config, moment
-                    )
-                    topic.setdefault("discovery_ids", []).append(discovery["discovery_id"])
-                    for solution in [discovery.get("primary_solution"), *discovery.get("other_solutions", [])]:
-                        if solution and solution.get("name") not in topic.setdefault("introduced_solutions", []):
-                            topic["introduced_solutions"].append(solution["name"])
-                    save_topic(paths, topic)
-                    save_discovery(paths, discovery)
-                    mark_events_analyzed(paths, events, moment)
-                    discoveries.append(discovery)
-            except Exception as error:  # keep a readable failure record for the skeleton
-                skipped = f"分析失败：{error}"
-
-        report = _render_report(paths, config, moment, feedback, discoveries, skipped)
-        finished = to_iso(utcnow())
-        failed = bool(skipped and skipped.startswith("分析失败"))
-        status = "failed" if failed else "completed"
-        append_run(
-            paths,
-            {
-                "run_id": run_id,
-                "run_type": "scheduled" if scheduled else "manual",
-                "status": status,
-                "started_at": started,
-                "finished_at": finished,
-                "window_start": to_iso(window_start),
-                "window_end": to_iso(moment),
-                "feedback": feedback,
-                "discovery_ids": [item["discovery_id"] for item in discoveries],
-                "event_count": len(new_events),
-                "error": skipped if status == "failed" else None,
-            },
-        )
-        state.update(
-            {
-                "last_attempt_at": started,
-                "last_run_id": run_id,
-                "last_event_count": len(new_events),
-            }
-        )
-        if status == "completed":
-            state["last_success_at"] = started
-            save_state(paths, state)
-        else:
-            save_state(paths, state)
-        if make_backup:
-            backup_data(paths)
-        cleanup_events(paths, config)
-        return {
-            "status": status,
-            "run_id": run_id,
-            "feedback": feedback,
-            "discoveries": [item["discovery_id"] for item in discoveries],
-            "report": report,
-            "skipped": skipped,
-        }
-
-
-# ============================================================================
-# cli
-# ============================================================================
-
-def _paths(args: argparse.Namespace) -> FomorPaths:
-    return FomorPaths.resolve(getattr(args, "home", None))
-
-
-def _read_hook_payload() -> dict[str, Any] | None:
-    raw = sys.stdin.read()
-    if not raw.strip():
-        return None
-    payload = json.loads(raw)
-    if not isinstance(payload, dict):
-        raise ValueError("hook payload must be a JSON object")
-    return payload
-
-
-def cmd_init(args: argparse.Namespace) -> int:
-    paths = _paths(args)
-    config = ensure_initialized(paths)
-    print(f"initialized: {paths.root}")
-    print(f"schedule: every day at {config['schedule']['hour']:02d}:{config['schedule']['minute']:02d} ({config['timezone']})")
-    print(f"retention: events={config['retention']['event_days']}d feedback={config['retention']['feedback_days']}d")
-    return 0
+# ----------------------------------------------------------------------------
+# commands
+# ----------------------------------------------------------------------------
 
 
 def cmd_session_start(args: argparse.Namespace) -> int:
-    """SessionStart hook: silently verify the environment, then catch up."""
+    """SessionStart hook: silently verify/repair the environment."""
     try:
-        paths = _paths(args)
-        config = ensure_initialized(paths)
-        report = verify_environment(paths, config)
-        result = catch_up(paths, config=config, detach=True)
+        home = _home(args)
+        before = home.config_file.exists() and home.events_dir.is_dir()
+        home.ensure()
         if args.verbose:
-            print(json.dumps({**report, "catch_up": result}, ensure_ascii=False))
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "home": str(home.root),
+                        "existed": bool(before),
+                        "schedule": home.config()["schedule"],
+                        "timezone": home.config()["timezone"],
+                    },
+                    ensure_ascii=False,
+                )
+            )
         return 0
     except Exception as error:  # never block the session
         print(f"fomor session-start error: {error}", file=sys.stderr)
@@ -1851,138 +231,65 @@ def cmd_session_start(args: argparse.Namespace) -> int:
 
 
 def cmd_hook(args: argparse.Namespace) -> int:
-    """Fast, non-blocking UserPromptSubmit hook. Never breaks the user's turn."""
+    """Fast, silent UserPromptSubmit hook. Never breaks the user's turn."""
     try:
-        payload = _read_hook_payload()
-        if not payload:
+        raw = sys.stdin.read()
+        payload = json.loads(raw) if raw.strip() else None
+        if not isinstance(payload, dict):
             return 0
-        paths = _paths(args)
-        config = ensure_initialized(paths)
-        event = normalize_hook_payload(payload)
-        if not event["user_message"]:
-            return 0
-        _, duplicate = append_event(paths, config, event)
-        if duplicate:
-            print("duplicate event skipped", file=sys.stderr)
-        return 0
-    except Exception as error:  # hooks must not block the agent
+        append_event(_home(args), payload)
+    except Exception as error:  # collect is best-effort
         print(f"fomor hook error: {error}", file=sys.stderr)
-        return 0
+    return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    paths = _paths(args)
-    config = ensure_initialized(paths)
-    state = load_state(paths)
-    events = list(iter_events(paths))
-    pending = list_discoveries(paths, status="observing")
-    promoted = list_discoveries(paths, status="promoted")
-    schedule = catch_up_inline(paths, config)
-    print(f"home: {paths.root}")
-    print(f"events: {len(events)}")
-    print(f"topics: {len(list_topics(paths))}")
-    print(f"discoveries: pending={len(pending)} promoted={len(promoted)}")
-    print(f"last_success_at: {state.get('last_success_at', 'never')}")
-    print(f"schedule: every day at {schedule_label(config)} ({config['timezone']})")
-    print(f"analysis_due: {'yes' if schedule['due'] else 'no'}")
-    print(f"latest_cutoff: {schedule['latest_cutoff']}")
-    print(f"report: {paths.reports_dir / 'latest.md'}")
+    home = _home(args)
+    home.ensure()
+    config = home.config()
+    state = home.state()
+    observing, promoted = count_discoveries(home)
+    print(f"home: {home.root}")
+    print(f"events: {count_events(home)}")
+    print(f"topics: {len(list(home.topics_dir.glob('*.json')))}")
+    print(f"discoveries: observing={observing} promoted={promoted}")
+    print(f"last_analyzed_at: {state.get('last_analyzed_at', 'never')}")
+    print(f"schedule: {config['schedule']} ({config['timezone']})")
+    print(f"report: {home.reports_dir / 'latest.md'}")
     return 0
 
 
-def cmd_analyze(args: argparse.Namespace) -> int:
-    paths = _paths(args)
-    config = ensure_initialized(paths)
-    if args.llm:
-        config["llm"]["mode"] = args.llm
-        save_config(paths, config)
-    result = run_analysis(
-        paths,
-        config=config,
-        scheduled=args.scheduled,
-        make_backup=not args.no_backup,
-    )
-    if result["status"] == "skipped":
-        print(result.get("report") or "skipped")
-        return 0
-    print(result["report"])
-    return 0 if result["status"] == "completed" else 1
-
-
-def cmd_catch_up(args: argparse.Namespace) -> int:
-    paths = _paths(args)
-    config = ensure_initialized(paths)
-    if args.foreground:
-        state = catch_up_inline(paths, config)
-        if not state["due"]:
-            print("not due")
-            return 0
-        result = run_analysis(paths, config=config, scheduled=True)
-        print(result.get("report") or result["status"])
-        return 0 if result["status"] == "completed" else 1
-    result = catch_up(paths, config=config, detach=True)
-    print(json.dumps(result, ensure_ascii=False))
-    return 0
-
-
-def cmd_prompts(args: argparse.Namespace) -> int:
-    for name in ["system", *describe_tasks()]:
-        print(name)
-    return 0
+def _home(args: argparse.Namespace) -> Home:
+    override = os.environ.get("FOMOR_HOME")
+    if override:
+        return Home(Path(override).expanduser())
+    root = Path(args.home).expanduser() if args.home else Path("~/.fomor").expanduser()
+    return Home(root)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    # ``--home`` is accepted both before and after the subcommand so the
-    # detached catch-up command can be written unambiguously.
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--home", default=argparse.SUPPRESS, help="data directory, default ~/.fomor")
+    common.add_argument("--home", help="data directory, default ~/.fomor (or $FOMOR_HOME)")
 
-    parser = argparse.ArgumentParser(prog="fomor", description="Fomor local exploration assistant")
-    parser.add_argument("--home", default=None, help="data directory, default ~/.fomor")
+    parser = argparse.ArgumentParser(prog="fomor", description="Fomor prompt collector")
     parser.add_argument("--version", action="version", version=f"fomor {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    init = sub.add_parser("init", parents=[common], help="create ~/.fomor and default settings")
-    init.set_defaults(func=cmd_init)
-
-    session = sub.add_parser(
-        "session-start",
-        parents=[common],
-        help="verify/repair the local environment, then catch up if the configured daily run was missed",
-    )
+    session = sub.add_parser("session-start", parents=[common], help="silently create/verify ~/.fomor")
     session.add_argument("--verbose", action="store_true", help="print the environment report")
     session.set_defaults(func=cmd_session_start)
 
     hook = sub.add_parser("hook", parents=[common], help="read a Trae UserPromptSubmit payload from stdin")
     hook.set_defaults(func=cmd_hook)
 
-    status = sub.add_parser("status", parents=[common], help="show counts and schedule state")
+    status = sub.add_parser("status", parents=[common], help="print counts, schedule and last analysis time")
     status.set_defaults(func=cmd_status)
-
-    analyze = sub.add_parser("analyze", parents=[common], help="run feedback review and analysis")
-    analyze.add_argument("--scheduled", action="store_true", help="only run when the configured daily cutoff is due")
-    analyze.add_argument("--llm", choices=["mock", "traecli", "openai"], help="override llm mode")
-    analyze.add_argument("--no-backup", action="store_true")
-    analyze.set_defaults(func=cmd_analyze)
-
-    catch = sub.add_parser("catch-up", parents=[common], help="spawn analysis if the configured daily run was missed")
-    catch.add_argument("--foreground", action="store_true", help="run inline instead of spawning")
-    catch.set_defaults(func=cmd_catch_up)
-
-    prompts = sub.add_parser("prompts", parents=[common], help="list prompt tasks")
-    prompts.set_defaults(func=cmd_prompts)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    return args.func(args)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-
+    args = build_parser().parse_args(argv)
+    return int(args.func(args))
 
 
 if __name__ == "__main__":
