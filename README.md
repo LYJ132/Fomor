@@ -36,14 +36,11 @@ scripts/fomor status
 
 ```text
 scripts/
-└── fomor               唯一可执行入口（单文件，无扩展名）
+└── fomor               唯一可执行入口（单文件，含全部逻辑与提示词契约）
 hooks/
 └── hooks.json          UserPromptSubmit 采集 + SessionStart 环境校验/补跑
-references/
-├── 00-system.md        分析引擎全局规则（由 scripts/fomor 自动加载）
-├── 01-aggregate.md … 06-feedback.md   各阶段提示词契约（同上）
-└── 07-data-model.md    ~/.fomor/ 目录与字段说明
-skills/SKILL.md   用户调用时的部署检查 + 自动化任务模板
+skills/
+└── SKILL.md            唯一流程文档：部署检查、自动化任务模板、数据速查
 docs/                   维护者文档，不参与运行时
 tests/                  标准库 unittest
 .trae-plugin/plugin.json
@@ -51,9 +48,9 @@ tests/                  标准库 unittest
 
 约定：
 
-- 可执行逻辑只在 `scripts/fomor` 与 `hooks/`
-- `references/` 只放静态、按需读取的参考内容（提示词契约、数据模型）
-- 同一个 SOP 只写一个 skill，不按步骤拆分
+- 运行时只有四个文件：`plugin.json`、`hooks/hooks.json`、`scripts/fomor`、`skills/SKILL.md`
+- 提示词契约内嵌在 `scripts/fomor`（与解析代码强耦合），不单独放参考文件
+- 模型执行流程只读 `skills/SKILL.md` 一个文档
 - `docs/` 是维护者文档，不注入运行时
 
 运行时数据全部在 `~/.fomor/`：`events/`、`topics/`、`discoveries/{pending,promoted}`、`tombstones/`、`reports/`、`runtime/`、`logs/`、`backup/`。仓库不携带任何数据目录；首次使用时由 `SessionStart` 静默创建。

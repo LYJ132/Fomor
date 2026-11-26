@@ -987,11 +987,9 @@ fomor/
 ├── hooks/
 │   └── hooks.json             # UserPromptSubmit 采集 + SessionStart 补跑
 ├── scripts/
-│   └── fomor                  # 唯一可执行入口（单文件）
-├── references/                # 提示词契约与数据模型
+│   └── fomor                  # 唯一可执行入口（单文件，含提示词契约）
 └── skills/
-    └── fomor/
-        └── SKILL.md           # 完整 SOP，不按步骤拆分
+    └── SKILL.md               # 唯一流程文档：部署检查 + 自动化任务模板
 ```
 
 数据目录：

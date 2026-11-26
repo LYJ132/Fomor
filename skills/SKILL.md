@@ -18,7 +18,7 @@ Fomor 采集用户在 Trae 中提出的问题（`UserPromptSubmit` Hook），由
 | **自动化任务** | 每天定时 | 调用 `scripts/fomor analyze --scheduled` 并展示报告 | — |
 | **本技能** | 用户主动调用 | 检查部署、指导创建自动化任务 | 不代替用户创建任务 |
 
-用户调用本技能时，按下面三步执行，每步把结果同步给用户。
+用户调用本技能时，按下面三步执行，每步把结果同步给用户。本文件是唯一流程文档，不需要读仓库里其他文件。
 
 ## 第一步：环境与依赖检查
 
@@ -39,7 +39,7 @@ UserPromptSubmit → <插件根目录>/scripts/fomor hook
 SessionStart     → <插件根目录>/scripts/fomor session-start
 ```
 
-缺失时把仓库 `hooks/hooks.json` 的内容合并进去并替换 `${TRAE_PLUGIN_ROOT}`，然后提醒用户在「设置 > Hooks」启用并接受安全提示（项目级 Hook 还需信任工作区）。注意：`session-start` 只做环境初始化与补跑，**创建自动化任务不在这条链路里**，由下一步完成。
+缺失时把仓库 `hooks/hooks.json` 的内容合并进去并替换 `${TRAE_PLUGIN_ROOT}`，然后提醒用户在「设置 > Hooks」启用并接受安全提示（项目级 Hook 还需信任工作区）。注意：`session-start` 只做环境初始化与补跑，**创建自动化任务不在这条链路里**，由第二步完成。
 
 ## 第二步：提供自动化任务模板（本技能的核心交付）
 
@@ -74,8 +74,28 @@ scripts/fomor status
 - 从 `~/.fomor/events/<当天>.jsonl` 删除 `session_id` 为 `setup-check` 的自检记录；
 - 最后向用户列出剩余动作清单（通常是：创建自动化任务、在设置中启用 Hook）。
 
-## 其他材料（不属于本技能流程）
+## 数据与配置速查（排障时用）
 
-- `references/00-system.md` ~ `06-feedback.md`：分析引擎的提示词契约，由 `scripts/fomor` 在分析时自动加载，无需阅读；
-- `references/07-data-model.md`：`~/.fomor/` 目录与字段说明，排查数据问题时查阅；
-- 日常看报告不走本技能：`cat ~/.fomor/reports/latest.md`。
+```text
+~/.fomor/
+├── config/settings.json      配置：schedule（分析时间）、llm.mode（mock/traecli/openai）、retention
+├── events/YYYY-MM-DD.jsonl   用户问题，按天归档，保留 8 天
+├── topics/                   长期话题（有兴趣的 Discovery 提升而来）
+├── discoveries/{pending,promoted}/   观察期 7 天；提升后进 promoted
+├── reports/latest.md         最近一次报告
+├── runtime/state.json        last_success_at 决定每日分析是否到期
+└── logs/catchup.log          补跑日志
+```
+
+Event 只有 6 个字段，每个都有用途：`event_id`（关联主键）、`session_id`（会话定位）、`timestamp`（窗口与归因边界）、`user_message`（唯一内容）、`fingerprint`（防多 Hook 重复采集）、`analyzed_at`（防重复聚合）。
+
+常用命令：
+
+```bash
+scripts/fomor status            # 概览与 schedule
+scripts/fomor analyze           # 立即分析（自动化任务用 --scheduled）
+scripts/fomor catch-up          # 手动补跑
+cat ~/.fomor/reports/latest.md  # 日常看报告不走本技能
+```
+
+提示词契约（聚合/理解/评分/探索/报告/反馈的 JSON 结构）内嵌在 `scripts/fomor` 中，由分析流程自动使用，无需阅读；完整数据模型见 [docs/PRD.md](../docs/PRD.md)。

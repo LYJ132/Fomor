@@ -392,18 +392,17 @@ fomor/
 ├── hooks/
 │   └── hooks.json             # UserPromptSubmit 采集 + SessionStart 补跑
 ├── scripts/
-│   └── fomor                  # 唯一可执行入口（单文件）
-├── references/                # 静态参考：提示词契约、数据模型
+│   └── fomor                  # 唯一可执行入口（单文件，含提示词契约）
 ├── skills/
-│   └── fomor/SKILL.md         # 完整 SOP（不拆步骤）
+│   └── SKILL.md               # 唯一流程文档（部署检查 + 自动化任务模板）
 └── docs/                      # 维护者文档，不进入运行时
 ```
 
 约定：
 
-- 可执行逻辑只放 `scripts/` 与 `hooks/`；
-- `references/` 只放「读」的内容，不放可执行代码；
-- 同一个 SOP 只写一个 Skill；
+- 运行时只有四个文件：plugin.json、hooks.json、scripts/fomor、SKILL.md；
+- 提示词契约内嵌在 `scripts/fomor`（与解析代码强耦合），不单独放参考文件；
+- 同一个流程只写一个 Skill，模型只读一个文档；
 - 用户数据不放在插件包内，统一写到 `~/.fomor/`（见 11.4）。
 
 插件负责「被发现、被安装、被调用」。`plugin.json` 通过 `hooks` 字段引用 `hooks/hooks.json`；但由于 Trae 是否自动加载插件 Hook 尚未验证，安装引导仍需保留“复制到全局 hooks.json 并替换为绝对路径”的兜底步骤。
@@ -566,10 +565,8 @@ fomor/
 │   └── hooks.json
 ├── scripts/
 │   └── fomor
-├── references/
 └── skills/
-    └── fomor/
-        └── SKILL.md
+    └── SKILL.md
 ```
 
 用户数据放在用户主目录的独立目录：
