@@ -11,7 +11,7 @@ Commands:
     hook           read a Trae UserPromptSubmit payload from stdin
     status         show counts and schedule state
     analyze        run feedback review and analysis
-    catch-up       spawn analysis if the 03:00 run was missed
+    catch-up       spawn analysis if the configured daily run was missed
     prompts        list prompt tasks
 """
 
@@ -312,7 +312,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "schedule": {
         "hour": 3,
         "minute": 0,
-        # A run is considered due when it is older than the 03:00 cutoff.
+        # A run is considered due when it is older than the configured daily cutoff.
         # The SessionStart catch-up uses this value to avoid running twice.
         "catch_up_after_hours": 20,
     },
@@ -1072,6 +1072,11 @@ def next_cutoff(now: datetime, config: dict[str, Any]) -> datetime:
     return latest_cutoff(now, config) + timedelta(days=1)
 
 
+def schedule_label(config: dict[str, Any]) -> str:
+    """Human-readable daily analysis time from the user's settings."""
+    return f"{int(config['schedule']['hour']):02d}:{int(config['schedule']['minute']):02d}"
+
+
 def is_due(paths: FomorPaths, config: dict[str, Any], now: datetime | None = None) -> bool:
     moment = now or utcnow()
     state = load_state(paths)
@@ -1087,7 +1092,7 @@ def catch_up(
     detach: bool = True,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Run catch-up analysis if the latest 03:00 cutoff was missed."""
+    """Run catch-up analysis if the latest configured cutoff was missed."""
     moment = now or utcnow()
     if not is_due(paths, config, moment):
         return {"status": "not_due", "checked_at": to_iso(moment)}
@@ -1379,7 +1384,7 @@ def run_analysis(
             return {
                 "status": "skipped",
                 "reason": "not_due",
-                "report": "还没到下一次 03:00，且已有成功运行记录。",
+                "report": f"还没到下一次 {schedule_label(config)}，且已有成功运行记录。",
             }
         state = load_state(paths)
         run_id = new_id("run")
@@ -1585,7 +1590,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"topics: {len(list_topics(paths))}")
     print(f"discoveries: pending={len(pending)} promoted={len(promoted)}")
     print(f"last_success_at: {state.get('last_success_at', 'never')}")
-    print(f"next_03:00_due: {'yes' if schedule['due'] else 'no'}")
+    print(f"schedule: every day at {schedule_label(config)} ({config['timezone']})")
+    print(f"analysis_due: {'yes' if schedule['due'] else 'no'}")
     print(f"latest_cutoff: {schedule['latest_cutoff']}")
     print(f"report: {paths.reports_dir / 'latest.md'}")
     return 0
@@ -1649,7 +1655,7 @@ def build_parser() -> argparse.ArgumentParser:
     session = sub.add_parser(
         "session-start",
         parents=[common],
-        help="verify/repair the local environment, then catch up if 03:00 was missed",
+        help="verify/repair the local environment, then catch up if the configured daily run was missed",
     )
     session.add_argument("--verbose", action="store_true", help="print the environment report")
     session.set_defaults(func=cmd_session_start)
@@ -1661,12 +1667,12 @@ def build_parser() -> argparse.ArgumentParser:
     status.set_defaults(func=cmd_status)
 
     analyze = sub.add_parser("analyze", parents=[common], help="run feedback review and analysis")
-    analyze.add_argument("--scheduled", action="store_true", help="only run when the 03:00 cutoff is due")
+    analyze.add_argument("--scheduled", action="store_true", help="only run when the configured daily cutoff is due")
     analyze.add_argument("--llm", choices=["mock", "traecli", "openai"], help="override llm mode")
     analyze.add_argument("--no-backup", action="store_true")
     analyze.set_defaults(func=cmd_analyze)
 
-    catch = sub.add_parser("catch-up", parents=[common], help="spawn analysis if the 03:00 run was missed")
+    catch = sub.add_parser("catch-up", parents=[common], help="spawn analysis if the configured daily run was missed")
     catch.add_argument("--foreground", action="store_true", help="run inline instead of spawning")
     catch.set_defaults(func=cmd_catch_up)
 

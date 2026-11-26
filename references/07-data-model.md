@@ -34,7 +34,7 @@
 
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
-| `timezone` | `Asia/Shanghai` | 本地日与 03:00 截止时间的时区 |
+| `timezone` | `Asia/Shanghai` | 本地日与每日分析截止时间的时区 |
 | `schedule.hour` / `schedule.minute` | `3` / `0` | 每日分析截止时间 |
 | `retention.event_days` | `8` | Event 保留天数（7 天反馈窗 + 1 天缓冲） |
 | `retention.feedback_days` | `7` | Discovery 观察期 |
@@ -92,7 +92,7 @@
 | `discovery_id` / `topic_id` / `topic_name` | 标识与所属主题 |
 | `created_at` | 生成时间，反馈窗口起点 |
 | `status` | `observing` / `promoted` / `dismissed` |
-| `feedback_due_at` | 下一次反馈回看时间（次日 03:00） |
+| `feedback_due_at` | 下一次反馈回看时间（次日分析时间） |
 | `expires_at` | 观察期结束时间 |
 | `title` / `observed` | 标题与观察到的现象 |
 | `problem_understanding` | 六层理解结果 |
@@ -113,7 +113,7 @@
 | 字段 | 说明 |
 | --- | --- |
 | `last_attempt_at` | 最近一次分析开始时间 |
-| `last_success_at` | 最近一次成功时间，决定 03:00 是否到期 |
+| `last_success_at` | 最近一次成功时间，决定每日分析是否到期 |
 | `last_run_id` | 最近一次运行 ID |
 | `last_event_count` | 最近一次参与分析的事件数 |
 
@@ -121,7 +121,7 @@
 
 ## 时间与清理规则
 
-1. 以实际运行时刻计算窗口；`latest_cutoff` 是最近一个已过的本地 03:00。
+1. 以实际运行时刻计算窗口；`latest_cutoff` 是最近一个已过的本地分析时间（默认 03:00，由 `schedule.hour` / `schedule.minute` 决定）。
 2. 次日运行先回看：只检查 Discovery 生成之后、当前时刻之前的提问。
 3. Discovery 到期且无兴趣 → 删除并写入 tombstone。
 4. Event 按天整文件删除，不拆分单日文件。

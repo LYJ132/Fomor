@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fomor.config import ensure_initialized
 from fomor.paths import FomorPaths
-from fomor.scheduler import is_due, latest_cutoff, next_cutoff
+from fomor.scheduler import is_due, latest_cutoff, next_cutoff, schedule_label
 from fomor.store import save_state
 from fomor.utils import to_iso
 
@@ -33,6 +33,14 @@ class SchedulerTest(unittest.TestCase):
     def test_next_cutoff_is_one_day_later(self):
         now = datetime(2026, 11, 25, 1, 0, tzinfo=timezone.utc)
         self.assertEqual(next_cutoff(now, self.config), datetime(2026, 11, 25, 19, 0, tzinfo=timezone.utc))
+
+    def test_custom_schedule_is_respected(self):
+        # 2026-11-25 02:00 UTC == 10:00 Asia/Shanghai; with a 09:30 cutoff
+        # today's cutoff has just passed.
+        self.config["schedule"] = {"hour": 9, "minute": 30}
+        now = datetime(2026, 11, 25, 2, 0, tzinfo=timezone.utc)
+        self.assertEqual(latest_cutoff(now, self.config), datetime(2026, 11, 25, 1, 30, tzinfo=timezone.utc))
+        self.assertEqual(schedule_label(self.config), "09:30")
 
     def test_due_when_never_run(self):
         self.assertTrue(is_due(self.paths, self.config, datetime.now(timezone.utc)))

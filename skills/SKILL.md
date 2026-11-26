@@ -1,13 +1,13 @@
 ---
 name: fomor
-description: Use when setting up Fomor, running the daily 03:00 analysis, or reviewing what Fomor explored. One SOP covers install, hook verification, analysis, report review, feedback and retention. Do not split this flow into separate skills.
+description: Use when setting up Fomor, running the daily analysis (default 03:00, configurable), or reviewing what Fomor explored. One SOP covers install, hook verification, analysis, report review, feedback and retention. Do not split this flow into separate skills.
 user-invocable: true
 disable-model-invocation: false
 ---
 
 # Fomor
 
-Fomor 是一个本地探索助手：采集你在 Trae 中提出的问题，每天 03:00 分析一次，尝试给出**另一条解决路径**，并把你的后续提问当作反馈。数据只存在本机 `~/.fomor/`，不向 Agent 会话注入内容。
+Fomor 是一个本地探索助手：采集你在 Trae 中提出的问题，每天在配置的时间分析一次（默认 03:00），尝试给出**另一条解决路径**，并把你的后续提问当作反馈。数据只存在本机 `~/.fomor/`，不向 Agent 会话注入内容。
 
 本文件是唯一操作入口。安装、分析、查看、排障属于同一条 SOP，不要拆成多个技能。
 
@@ -19,9 +19,9 @@ UserPromptSubmit Hook            SessionStart Hook
         ▼                              ▼
   events/ 追加问题            ① 并行校验环境（Python、目录、settings）
                               ② 缺失项静默补齐，无第三方依赖则不下载
-                              ③ catch-up：补跑错过的 03:00
+                              ③ catch-up：补跑错过的每日分析
         │                              │
-        └──────────► 03:00 分析 ◄──────┘
+        └──────────► 每日分析 ◄────────┘
                         │
           ① 回看昨日 Discovery 的反馈
           ② 聚合 → 六层理解 → 机会评分 → 方案探索
@@ -64,7 +64,7 @@ UserPromptSubmit Hook            SessionStart Hook
    - `UserPromptSubmit` → `scripts/fomor hook`
    - `SessionStart` → `scripts/fomor session-start`
 
-4. 在 Trae「自动化」中创建任务：名称 `Fomor 每日探索`，每天 03:00，**本地运行**，任务内容为「使用 fomor 技能执行今日分析并展示报告」。
+4. 在 Trae「自动化」中创建任务：名称 `Fomor 每日探索`，**本地运行**，任务内容为「使用 fomor 技能执行今日分析并展示报告」。触发时间取 `scripts/fomor status` 中 `schedule` 的值（默认 03:00）。修改 `~/.fomor/config/settings.json` 的 `schedule.hour` / `schedule.minute` 后，需同步修改自动化任务的触发时间（平台侧不支持由插件自动修改）。
 
    本地任务要求电脑保持唤醒。睡眠期间不会执行，由 `SessionStart` 的 `session-start` 在下次唤醒时补跑。
 
@@ -79,13 +79,13 @@ UserPromptSubmit Hook            SessionStart Hook
 
 ## 每日分析
 
-由 03:00 自动化任务执行：
+由每天配置时间的自动化任务执行（默认 03:00）：
 
 ```bash
 scripts/fomor analyze --scheduled
 ```
 
-- 若输出 `还没到下一次 03:00，且已有成功运行记录。`，说明本次无需执行，直接告知用户，不要重复跑。
+- 若输出 `还没到下一次 <配置时间>，且已有成功运行记录。`，说明本次无需执行，直接告知用户，不要重复跑。
 - 否则输出完整 Markdown 报告：完整展示给用户，可在末尾补一句「继续追问某个方向，它会在下次分析时被移入长期记忆；没有追问的内容会在 7 天后删除」。
 - 出现 `分析失败：…` 时原样转述，并检查 `~/.fomor/config/settings.json` 的模型配置。
 
@@ -135,5 +135,5 @@ scripts/fomor status
 ## 排障
 
 - Hook 报错只写入 stderr，不影响用户提问；查看 Trae 的 Agent Hooks 日志与 `~/.fomor/logs/catchup.log`。
-- `catch-up` 未执行：确认已过最近一次 03:00，且 `runtime/state.json` 中没有更新的成功记录。
+- `catch-up` 未执行：确认已过最近一次配置的分析时间，且 `runtime/state.json` 中没有更新的成功记录。
 - 数据目录权限异常：不要在共享目录初始化；重新执行 `scripts/fomor init` 会把根目录权限修正为 `0700`。

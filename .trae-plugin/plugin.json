@@ -16,12 +16,12 @@
     "local-memory",
     "skills"
   ],
-  "skills": "./skills/",
+  "skills": "./skills",
   "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Fomor",
     "shortDescription": "Daily exploration of alternative solution paths based on your Trae prompts",
-    "longDescription": "Fomor collects the questions you send in Trae through a lightweight UserPromptSubmit hook, analyzes them daily at 03:00 with a Trae automation task, and writes a discovery report to ~/.fomor. Questions you keep asking about are promoted into long-term topics; ignored discoveries expire automatically. It never injects content into your agent session.",
+    "longDescription": "Fomor collects the questions you send in Trae through a lightweight UserPromptSubmit hook, analyzes them daily at a configurable time (default 03:00) with a Trae automation task, and writes a discovery report to ~/.fomor. Questions you keep asking about are promoted into long-term topics; ignored discoveries expire automatically. It never injects content into your agent session.",
     "developerName": "LYJ132",
     "category": "Developer Tools",
     "capabilities": [
