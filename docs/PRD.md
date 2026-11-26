@@ -83,8 +83,8 @@
 | --- | --- | --- |
 | 数据采集 | `UserPromptSubmit` Hook 静默追加事件到按天 JSONL；只存用户消息 + 最少元数据（session_id / timestamp / fingerprint），**无任何处理标记**；Hook 不分析、不注入、不阻塞 | 与上一版一致 |
 | 事件生命周期 | prepare 只读并记录快照（每文件行数边界）；分析成功后 `finish` 按快照删除已读事件，期间新增的消息自动保留；**分析失败不清理**，下次重跑 | 替代旧的 8 天过期清理与处理标记方案 |
-| 每日探索 | Trae 自动化任务中的 Agent 按四阶段 SOP 执行：prepare → 观察（Observation）→ 假设（Hypothesis）→ 发现新可能性（Opportunity Discovery）→ 研究与评估（Research & Evaluation）→ 探索目录/详情 → finish | 用户零模型配置；没有高价值方向就明说，不凑数 |
-| 输出方式 | **两层结构**：第一层「探索目录」（近期观察 + 方向列表，标题 + 一句说明）；第二层「探索详情」（关联、理由、方案内容、证据来源、条件限制），写入 `~/.fomor/reports/` | 替代旧的单一 Discovery 报告 |
+| 每日探索 | Trae 自动化任务中的 Agent 按四阶段 SOP 执行：prepare → 观察（Observation）→ 挖掘潜在需求（Hypothesis）→ 广泛发现（Opportunity Discovery）→ 筛选与验证（Research & Evaluation）→ 探索结果输出 → finish | 用户零模型配置；没有高价值内容就明说，不凑数 |
+| 输出方式 | **当天的探索结果**：个人助理开场 + 今日探索目录（条目直接是具体知识/方法/工具/资源，目录即价值）+ 分类展开的具体内容 + 简短结尾；写入 `~/.fomor/reports/<date>.md` 并展示在对话中 | 替代旧的单一 Discovery 报告与「目录+详情」两层文件 |
 | 用户记忆 | **只保留 Disliked**：仅记录用户明确拒绝的内容，且只在用户主动调用 Skill 时更新；每日分析只读不写；沉默/未追问/未点击一律不推断为拒绝 | Known 认知档案已删除（探索时实时判断）；pending / 反馈回看 / promoted / expired 全部删除 |
 | 结果返回 | 依托 Trae 自动化任务的输出 + 本地 reports 文件；不做独立 APP、IM 推送或 MCP 面板 | 未来接 IM 时探索结果可直接作为消息发送 |
 | 独立网页 | 当前不做 | 同上一版 |
@@ -1016,7 +1016,7 @@ fomor/
 │   └── 2026-11-25.jsonl       # 按天归档，无处理标记；finish 按快照清理已分析部分
 ├── profile.json               # {"version": 1, "dislikes": [...]}：只记明确拒绝
 ├── reports/
-│   └── 2026-11-25-<slug>.md   # 探索目录与详情；留存但不参与每日分析
+│   └── 2026-11-25.md         # 当天探索结果；留存但不参与每日分析
 └── runtime/
     └── state.json             # {"last_successful_analysis_at"}
 ```
