@@ -50,7 +50,7 @@ scripts/fomor session-start --verbose
 
 ### A2. 安装 / 更新 Skill
 
-如果你能读到本文档，说明 Skill 已加载；若是首次安装，把仓库的 `skills/SKILL.md` 放到下面任一位置：
+如果你能读到本文档，说明 Skill 已加载；若是首次安装，把仓库的 `skills/fomor/SKILL.md` 放到下面任一位置：
 
 | 范围 | 路径 |
 | --- | --- |

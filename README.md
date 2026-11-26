@@ -29,7 +29,7 @@ Agent Hook 负责采集，Python CLI 负责确定性操作，Agent Skill 负责�
 ```text
 UserPromptSubmit Hook ──► events/YYYY-MM-DD.jsonl（追加，无处理标记）
 SessionStart Hook    ──► 静默初始化/校验 ~/.fomor/
-每天 <schedule> 自动化任务 ──► Agent 按 skills/SKILL.md：
+每天 <schedule> 自动化任务 ──► Agent 按 skills/fomor/SKILL.md：
         prepare（读事件+dislikes+快照，不删除）
         → 观察 → 假设 → 发现新可能性 → 研究与评估
         → 探索结果 → finish（只删本轮已读，新增消息保留）
@@ -74,7 +74,8 @@ scripts/
 hooks/
 └── hooks.json          UserPromptSubmit 采集 + SessionStart 环境校验
 skills/
-└── SKILL.md            唯一流程文档：部署与管理 / 每日探索 SOP / 主动调用
+└── fomor/
+    └── SKILL.md        唯一流程文档：部署与管理 / 每日探索 SOP / 主动调用
 docs/                   PRD、待确认问题、平台调研
 tests/                  标准库 unittest
 .trae-plugin/plugin.json
