@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 import argparse
@@ -32,7 +33,8 @@ class SessionStartTest(unittest.TestCase):
             self.assertTrue(path.is_dir())
         self.assertEqual(self.home.config(), DEFAULT_CONFIG)
         self.assertEqual(self.home.profile(), DEFAULT_PROFILE)
-        self.assertEqual(self.home.root.stat().st_mode & 0o777, 0o700)
+        if os.name == "posix":  # chmod is a no-op on Windows
+            self.assertEqual(self.home.root.stat().st_mode & 0o777, 0o700)
 
     def test_verbose_prints_report(self):
         buffer = io.StringIO()

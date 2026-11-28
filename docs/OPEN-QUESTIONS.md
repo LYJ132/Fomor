@@ -37,7 +37,7 @@
 | Q-PLAT-01 | 首个适配的「Trae」具体指哪个形态：IDE 窗口、Agent 窗口、SOLO、Trae Work、Trae CLI，还是都要？ | 不同形态的 Hook、会话存储、插件能力差异很大，直接决定采集实现 | Trae 同时存在 IDE/Agent 窗口、SOLO/Work、CLI；Hook 文档主要面向 IDE/Agent 会话 | 选定一个首发形态并写清不支持范围 | P0 |
 | Q-PLAT-02 | Hook 能否随插件包一起分发并自动启用？ | 若必须用户手动配置，安装转化率和「无感采集」假设都会受挑战 | 官方 Hook 需在「设置 > Hooks」创建/启用，项目 Hook 还需目录信任；插件包公开字段中未发现 hooks 配置 | 验证插件市场是否允许携带/安装 Hook；若不行，设计引导式安装 | P0 |
 | Q-PLAT-03 | `UserPromptSubmit` 的 `prompt` 是否等于用户完整输入？是否包含 `@文件`、图片、粘贴内容、斜杠命令参数？ | 决定 Event 的记录粒度和后续理解质量 | 官方仅说明 `prompt` 为用户提交的 Prompt 文本，未说明多模态与附件处理 | 用真实会话实测（含图片、@文件、长粘贴）并定义降级策略 | P0 |
-| Q-PLAT-04 | 能否按 `session_id` 读取 IDE 会话历史？ | 「按需补充上下文」依赖它；否则含糊指代无法还原 | 无公开 API；唯一线索是 CLI 会话本地文件（第三方资料）。已把探测式读取说明写进 SKILL Step 0.3（运行时定位 rollout 文件 → 确认结构 → 失败即降级），并禁止解析 IDE 私有数据目录 | 在真实环境验证 rollout 文件是否存在、结构是否可解析；不可用则维持降级 | P1 |
+| Q-PLAT-04 | 能否按 `session_id` 读取 IDE 会话历史？ | 「按需补充上下文」依赖它；否则含糊指代无法还原 | **已实测（2026-11-28，Trae CN Windows）**：原文不可得（`ModularData/ai-agent/database.db` 加密，无公开 API）；memory 摘要可读且按 session_id 组织（消息级 `session_memory_<sid>.jsonl`：intent/actions/outcome/learned）。读取步骤已写定在 SKILL Step 0.3 | 已验证 CN 版 Windows；macOS/国际版路径待确认 | 已决策（降级路径保留） |
 | Q-PLAT-05 | 会话历史的保留期限、加密方式、访问权限如何？ | 决定「按需读取」是否合规、是否稳定可用 | 未在官方文档找到明确说明 | 与平台侧确认或做黑盒测试 | P1 |
 | Q-PLAT-06 | 多工作区/多项目下 Hook 会合并执行，如何避免同一问题重复采集？ | 重复 Event 会污染聚合与评分 | 官方文档明确多个 Hook 配置会合并执行 | 设计全局去重键（平台 + session_id + 消息指纹 + 时间窗） | P0 |
 | Q-PLAT-07 | 国内版与国际版配置路径不同（`~/.trae-cn` vs `~/.trae`），如何统一安装与运行？ | 影响安装器、默认数据目录和文档 | 官方国内文档为 `~/.trae-cn/hooks.json`；国际文档/CLI 相关路径为 `~/.trae` | 运行时探测 + 双路径兼容 | P1 |
@@ -227,7 +227,7 @@
 1. Q-PLAT-01 首发平台形态
 2. Q-PLAT-02 Hook 分发与安装方式
 3. Q-PLAT-03 Hook 输入完整性
-4. Q-PLAT-04 IDE 会话历史可读性（决定是否砍掉「按需上下文」）
+4. Q-PLAT-04 IDE 会话历史可读性（已实测：memory 摘要可读、原文不可得，SKILL 已写定读取与降级）
 5. Q-PLAT-06 多 Hook 去重
 6. Q-PLAT-08 Hook 运行模式与权限
 7. Q-PLAT-09 Hook 轻量化与失败兜底

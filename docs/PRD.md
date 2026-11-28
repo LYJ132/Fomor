@@ -353,9 +353,9 @@ Hook 只负责快速写入事件文件，不调用模型、不搜索、不读取
 
 默认不采集 Agent 回复和完整会话。只有 Step 0 发现值得探索、但单条用户消息不足以理解的线索时，才按需读取相关会话。
 
-平台读取方式必须先经实际研究和运行验证，再写入 Skill。需要明确会话定位方式、文件/接口位置、消息格式、用户与 Agent 消息区分方式、读取范围和失败降级方式。
+**已实测（2026-11-28，Trae CN Windows 本机）**：会话原文不可得（`database.db` 加密，无公开 API）；可读来源是 Trae memory 的按 `session_id` 组织的明文摘要——`~/.trae-cn/memory/projects/*/YYYYMMDD/session_memory_<session_id>.jsonl`（消息级：intent / actions / outcome / learned / 时间），辅以 `topics.md`（主题级）与 `project_memory.md`（项目级）。操作步骤写定在 SKILL Step 0.3。
 
-不解析未公开且不稳定的 IDE 私有数据目录；不假设未验证的接口存在；不能获取时明确标记上下文不可用，不得补写或臆测。
+不解析加密数据库与未公开结构；memory 找不到即上下文不可用，明确标记并降级，不得补写或臆测。
 
 ### 5.3 用户活动理解
 

@@ -166,28 +166,40 @@ scripts/fomor prepare
 
 消息已足够理解行为与意图 → 不获取额外上下文。只围绕值得探索的线索获取，不无条件拉取全部历史。
 
-#### 0.3 获取相关上下文（平台会话读取）
+#### 0.3 获取相关上下文（平台会话读取，2026-11-28 本机实测写定）
 
-以下是基于当前调研（2026-11）写定的操作说明，执行时按顺序探测即可，**不需要重新调研平台规则**：
+以下说明基于对 Trae CN（Windows）本机数据的实测验证，直接按步骤执行，**不需要重新调研平台规则**：
 
-- Trae 没有公开的「按 `session_id` 读会话历史」API；
-- 已知唯一线索是 **CLI 会话本地文件**（第三方逆向资料，非官方承诺，必须运行时探测）：
-  `${TRAE_HOME:-~/.trae}/cli/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl`，可能为 `.jsonl.zst` 压缩；国内版可能在 `~/.trae-cn` 下；
-- IDE 侧会话数据（如 macOS `~/Library/Application Support/Trae/ModularData`、Windows `%APPDATA%\Trae\ModularData`）结构未公开且不稳定，**禁止解析**。
+背景事实（已实测确认）：
 
-探测步骤：
+- 会话原始对话（用户/Agent 消息原文）**不可读**：存储在 `%APPDATA%\Trae CN\ModularData\ai-agent\database.db`（文件头非 SQLite，已加密），且无公开 API；
+- Fomor events 里的 `session_id` 就是会话 ID，与 memory、snapshot、attachments 中的同名 ID 一致；
+- 可读的上下文来源是 **Trae 自己的 memory 目录**，明文、按 session_id 组织。
 
-1. 用 `events` 里的 `session_id` 在上述目录中 grep 定位包含该 id 的 rollout 文件；当天找不到就查前 1–2 天；
-2. 文件存在 → 先读前几行确认 JSON 结构（每行一个 JSON 对象），确认用户消息与 Agent 消息各自的字段，再过滤出该 session 的记录；`.zst` 需要系统有 `zstd` 可用（`zstd -d`），没有就视为不可读；
-3. **区分用户消息与 Agent 消息以文件实际结构为准**（先抽样确认字段再批量处理）；无法可靠区分时，只使用能确认属于用户的消息；
-4. 工具调用、文件操作、代码变更等信息：会话文件里有对应记录就读取，没有或字段看不懂就不使用，不要猜。
+读取步骤：
 
-降级处理（每种失败都要走这条）：
+1. **消息级摘要（首选）**：
+   - 文件：`~/.trae-cn/memory/projects/*/YYYYMMDD/session_memory_<session_id>.jsonl`（国际版 `~/.trae/memory/...`）；
+   - 定位方式：跨项目目录按文件名通配 `session_memory_<session_id>.jsonl`，不要从工作区路径推导目录名；
+   - 每行一个 JSON，代表一次交互回合，字段：
+     - `intent` — 该回合用户想做什么；
+     - `actions` — Agent 做了哪些动作（列表）；
+     - `outcome` — 结果与状态；
+     - `learned` — 过程中确认的知识点（列表）；
+     - `message_summary_time` — 时间。
+   - 按时间顺序读取与当前线索相关的回合，即得到该会话的「用户意图 + Agent 已提供内容」——正好支撑 Step 1 的分析。
+2. **主题级摘要（补充）**：同目录的 `topics.md`，段落以 `[session_id: ... | topic_summary_time: ...]` 开头，是该会话的整体摘要。
+3. **项目级背景**：`~/.trae-cn/memory/projects/<工作区目录>/project_memory.md`，了解用户的项目约定与历史决策。
+4. **局限（都要记住）**：
+   - memory 只有 Trae 写过摘要的会话才有文件——找不到就是没有，不要猜；
+   - 摘要不含用户消息原文（原文用 events 的 `user_message`）；
+   - 会话结束后摘要可能有几分钟延迟才落盘。
 
-- 找不到会话文件 / 结构无法解析 / 压缩不可读 → **上下文不可用**：只用 `events` 里的问题原文继续，报告中把依赖上下文的结论标为「基于有限信息」；
-- **绝不编造对话内容**。
+降级处理：memory 文件不存在或解析失败 → **上下文不可用**：只用 `events` 的问题原文继续，报告中把依赖上下文的结论标为「基于有限信息」。**绝不编造对话内容**。
 
-Step 0 产出：一组「用户提问 + 必要上下文」的采集结果——events 原文、按线索摘取的历史片段、每条线索的来源 `session_id`。
+其他可读信号（可选，价值有限，不要花太多时间）：`%APPDATA%\Trae CN\ModularData\ai-agent\inbox\<target_session_id>\next\messages.jsonl`（跨会话消息的摘要与时间戳，无正文）；`command-execution\<executionId>\execution.json`（命令执行的 cwd 与时间，与会话 ID 的对应关系未确认）；`User\globalStorage\state.vscdb`（标准 SQLite，只读）中的 `chat-suggest:cache:<session_id>` 键（含 `messagesLength` 会话消息数与 `savedAt` 时间戳，可粗判会话规模）。
+
+Step 0 产出：一组「用户提问 + 必要上下文」的采集结果——events 原文、memory 中按线索摘取的 intent/learned 片段、每条线索的来源 `session_id`。
 
 ### Step 1：分析（Analysis）
 
