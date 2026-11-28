@@ -1,6 +1,6 @@
 {
   "name": "fomor",
-  "version": "0.7.0",
+  "version": "0.1.0",
   "description": "A local exploration assistant for Trae: observe the questions you ask your agent, infer what you may be missing, and every day bring back new knowledge, methods, tools and references you did not know about. No model configuration needed.",
   "author": {
     "name": "LYJ132"
