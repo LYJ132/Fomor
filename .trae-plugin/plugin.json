@@ -1,6 +1,6 @@
 {
   "name": "fomor",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "A local exploration assistant for Trae: observe the questions you ask your agent, infer what you may be missing, and every day bring back new knowledge, methods, tools and references you did not know about. No model configuration needed.",
   "author": {
     "name": "LYJ132"
@@ -21,7 +21,7 @@
   "interface": {
     "displayName": "Fomor",
     "shortDescription": "Daily discoveries of new knowledge, methods, tools and references, built from the questions you already ask your agent",
-    "longDescription": "Fomor collects the questions you send in Trae through a lightweight hook (no prompt injection, no session interference). Once a day, the Trae automation agent follows the bundled SOP: it observes what you were working on, infers what knowledge, methods, tools or experience you may be missing, then searches broadly across concepts, design languages, techniques, resources, real cases, workflows and cross-domain ideas instead of drilling into one topic. The result is a categorized exploration digest — an assistant-style opening, a catalog whose items are concrete findings, short sections explaining why each may help you, and links to keep exploring — delivered through the automation conversation. It never repeats what a normal AI conversation would already give you, never infers refusal from silence (you can explicitly mark content as unwanted by invoking the skill), and never injects content into your sessions.",
+    "longDescription": "Fomor collects the questions you send in Trae through a lightweight hook (no prompt injection, no session interference). Once a day, the Trae automation agent follows the bundled SOP: it gathers your questions plus the session context needed to understand them, analyzes what you are working on, then runs pack-based domain exploration — packs are markdown method files in skills/fomor/packs/ that define what to look for and what is worth recommending; drop one in and it is installed. Uncovered areas are reported back with pack suggestions. The result is a categorized exploration digest with an anchor table of contents, delivered through the automation conversation. It never repeats what a normal AI conversation would already give you, never infers refusal from silence (you can explicitly mark content as unwanted by invoking the skill), and never injects content into your sessions.",
     "developerName": "LYJ132",
     "category": "Developer Tools",
     "capabilities": [
